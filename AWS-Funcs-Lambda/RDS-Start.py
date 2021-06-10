@@ -3,6 +3,10 @@ import botocore
 import boto3
 from botocore.exceptions import ClientError
 
+#cron setup - 0 13 ? * MON-FRI *
+#cloudwatch setup to run at 9am Mon to Fri - in UTC/GMT
+
+
 def lambda_handler(event, context):
     rds = boto3.client('rds')
     lambdaFunc = boto3.client('lambda')
@@ -12,7 +16,7 @@ def lambda_handler(event, context):
             FunctionName='RDSStartFunction'
        )
         DBinstance = funcResponse['Environment']['Variables']['DBInstanceName']
-        print ('Stopping RDS service for DBInstance : ')
+        print ('Starting RDS service for DBInstance : ')
     except ClientError as e:
         print(e)    
     try:

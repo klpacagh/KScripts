@@ -3,6 +3,9 @@ import botocore
 import boto3
 from botocore.exceptions import ClientError
 
+#cron setup - 0 22 ? * MON-FRI *
+#cloudwatch setup to run at 6pm Mon to Fri - in UTC/GMT 
+
 def lambda_handler(event, context):
     rds = boto3.client('rds')
     lambdaFunc = boto3.client('lambda')
