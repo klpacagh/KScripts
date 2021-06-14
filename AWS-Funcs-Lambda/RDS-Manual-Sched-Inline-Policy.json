@@ -1,0 +1,15 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": "lambda:GetFunctionConfiguration",
+            "Resource": "arn:aws:lambda:us-east-1:302999338625:function:RDSStopFunction"
+        },
+        {
+            "Effect": "Allow",
+            "Action": "lambda:GetFunctionConfiguration",
+            "Resource": "arn:aws:lambda:us-east-1:302999338625:function:RDSStartFunction"
+        }
+    ]
+}
