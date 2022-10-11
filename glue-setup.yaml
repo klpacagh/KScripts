@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  CurrentVPC:
+    Description : VPC ID
+    Type: String
+  RDSGlueSecurityGroup:
+    NoEcho: true
+    Description : security group to be used by glue
+    Type: String
+  RDSSubnetID:
+    Description : subnet id within vpc for glue connection (ex. subnet-0a8f46313da20ae5f)
+    Type: String   
+  RDSConnectionJDBC:
+    Description : jdbc string for RDS (ex. jdbc:oracle:thin://@oratest-db.chbz3rc1g9ij.us-east-1.rds.amazonaws.com:1521/ORCL)
+    Type: String    
+  RDSDBUser:
+    NoEcho: true
+    Description : Username for read only user
+    Type: String
+    MinLength: 1
+    MaxLength: 45
+    ConstraintDescription : Must start with a letter and contain only alphanumeric characters
+  RDSDBPassword:
+    NoEcho: true
+    Description : Password for read only user
+    Type: String
+    MinLength: 1
+    MaxLength: 45
+    ConstraintDescription : Alphanumeric characters only
+  GlueDatabaseName:
+    Description : glue database name
+    Type: String
+    ConstraintDescription : Alphanumeric characters only
+  CrawlerName:
+    Description : crawler name
+    Type: String
+    ConstraintDescription : Alphanumeric characters only
+  CrawlerExtractionPath:
+    Description : crawler extraction path - ORACLE must use DBNAME/%, refer to docs
+    Type: String
+  GlueJobName:
+    Description : glue etl job name
+    Type: String
+    ConstraintDescription : Alphanumeric characters only
+  GlueJobPythonScriptLocation:
+    Description : s3 location of python script for glue job (ex. "s3://rds-glue-ora/glue-to-s3-dynamic.py")
+    Type: String
+
+Resources:
+
+  myRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref CurrentVPC
+
+  S3GatewayEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: '*'
+            Resource: '*'
+      RouteTableIds:
+        - !GetAtt myRouteTable.RouteTableId
+      ServiceName: 'com.amazonaws.us-east-1.s3'
+      VpcId: !Ref CurrentVPC
+
+  rdsS3GlueRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "glue.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonRDSFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+      RoleName: glue-rds-role
+      
+  glueDatabase:
+      Type: AWS::Glue::Database
+      Properties: 
+        CatalogId: !Ref AWS::AccountId
+        DatabaseInput: 
+          Description: 'Glue database for storing Crawled data from RDS'
+          Name: !Ref GlueDatabaseName
+
+  glueOraConnection:
+    Type: 'AWS::Glue::Connection'
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionType: "JDBC"
+        Name: 'glue-ora-connection'
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Ref RDSConnectionJDBC
+          USERNAME: !Ref RDSDBUser
+          PASSWORD: !Ref RDSDBPassword
+          JDBC_ENFORCE_SSL: false
+        PhysicalConnectionRequirements:
+          SecurityGroupIdList: [!Ref RDSGlueSecurityGroup]
+          SubnetId: !Ref RDSSubnetID
+
+  glueCrawler:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: !Ref CrawlerName
+      DatabaseName: !Ref glueDatabase
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref glueOraConnection
+            Path: !Ref CrawlerExtractionPath
+      Role: !Ref rdsS3GlueRole
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "DEPRECATE_IN_DATABASE"
+      Schedule:
+        ScheduleExpression: "cron(0 4 * * ? *)"
+
+  glueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Ref GlueJobPythonScriptLocation
+        PythonVersion: 3
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      MaxRetries: 0
+      Timeout: 10
+      NumberOfWorkers: 10
+      GlueVersion: '3.0'
+      WorkerType: 'G.1X'
+      Name: !Ref GlueJobName
+      Role: !Ref rdsS3GlueRole
+
+  glueScheduledJobTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Type: SCHEDULED
+      Description: DESCRIPTION_SCHEDULED
+      Schedule: cron(0 6 * * ? *)
+      Actions:
+        - JobName: !Ref GlueJobName
+          Arguments:
+            '--job-bookmark-option': job-bookmark-enable
+      Name: ora-to-s3-trigger-scheduled

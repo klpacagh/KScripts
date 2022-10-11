@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources: 
+
+  # myRouteTable:
+  #   Type: AWS::EC2::RouteTable
+  #   Properties:
+  #     VpcId: 'vpc-03c1b50f3d9ac101e'
+
+  # S3GatewayEndpoint:
+  #   Type: 'AWS::EC2::VPCEndpoint'
+  #   Properties:
+  #     PolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal: '*'
+  #           Action: '*'
+  #           Resource: '*'
+  #     RouteTableIds:
+  #       - !GetAtt myRouteTable.RouteTableId
+  #     ServiceName: 'com.amazonaws.us-east-1.s3'
+  #     VpcId: 'vpc-03c1b50f3d9ac101e'
+
+  GlueGatewayEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: '*'
+            Resource: '*'
+      ServiceName: 'com.amazonaws.us-east-1.glue'
+      VpcId: 'vpc-03c1b50f3d9ac101e'
+      VpcEndpointType: 'Interface'
+      SubnetIds: 
+        - 'subnet-0a724109705c153f7'
+        - 'subnet-09604e377a1c6d7be'
+      SecurityGroupIds: ['sg-0d3589dfbd73a3241']

@@ -1,0 +1,402 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+
+########### Main Parameters
+
+  VPCID:
+    Description : VPC ID
+    Type: String
+  GlueRoleName:
+    Description : Glue role name
+    Type: String
+  RDSGlueSecurityGroup1:
+    Description : security group to be used by glue and rds
+    Type: String
+  S3RawBucketPath:
+    Description: Path to target bucket for raw data (i.e s3://datalake-raw/)
+    Type: String
+  SourceSystemName1:
+    Description : Name of source system
+    Type: String
+  SourceSystemName2:
+    Description : Name of source system
+    Type: String
+
+########### RDS Parameters
+  RDSDBUser1:
+    NoEcho: true
+    Description : Username for read only user
+    Type: String
+    MinLength: 1
+    MaxLength: 45
+    ConstraintDescription : Must start with a letter and contain only alphanumeric characters
+  RDSDBPassword1:
+    NoEcho: true
+    Description : Password for read only user
+    Type: String
+    MinLength: 1
+    MaxLength: 45
+    ConstraintDescription : Alphanumeric characters only
+  RDSGlueSecurityGroup1:
+    NoEcho: true
+    Description : security group to be used by glue
+    Type: String
+  RDSConnectionJDBC1:
+    Description : jdbc string for RDS (ex. jdbc:oracle:thin://@oratest-db.chbz3rc1g9ij.us-east-1.rds.amazonaws.com:1521/ORCL)
+    Type: String    
+  RDSSubnetID1:
+    Description : subnet id within vpc for glue connection (ex. subnet-0a8f46313da20ae5f)
+    Type: String  
+
+  RDSDBUser2:
+    NoEcho: true
+    Description : Username for read only user
+    Type: String
+    MinLength: 1
+    MaxLength: 45
+    ConstraintDescription : Must start with a letter and contain only alphanumeric characters
+  RDSDBPassword2:
+    NoEcho: true
+    Description : Password for read only user
+    Type: String
+    MinLength: 1
+    MaxLength: 45
+    ConstraintDescription : Alphanumeric characters only
+  RDSGlueSecurityGroup2:
+    NoEcho: true
+    Description : security group to be used by glue
+    Type: String
+  RDSConnectionJDBC2:
+    Description : jdbc string for RDS (ex. jdbc:oracle:thin://@oratest-db.chbz3rc1g9ij.us-east-1.rds.amazonaws.com:1521/ORCL)
+    Type: String    
+  RDSSubnetID2:
+    Description : subnet id within vpc for glue connection (ex. subnet-0a8f46313da20ae5f)
+    Type: String  
+
+
+########### Glue Parameters
+  GlueDatabaseName1:
+    Type: String
+    Default: 'DB_NAME'
+  GlueCrawlerName1:
+    Type: String
+    Default: 'DB_NAME-crawler'
+  GlueConnectionName1:
+    Type: String
+    Default: 'glue-DB_NAME-connection'
+  GlueCrawlerExtractionPath1:
+    Description : crawler extraction path - ORACLE must use DBNAME/%, refer to docs
+    Type: String
+  GlueJobName1:
+    Description : glue etl job name
+    Type: String
+    ConstraintDescription : Alphanumeric characters only
+  GlueJobPythonScriptLocation1:
+    Description : s3 location of python script for glue job (ex. "s3://rds-glue-ora/glue-to-s3-dynamic.py")
+    Type: String
+  GlueWorkflowName1:
+    Description : name of glue workflow from crawler to job
+    Type: String 
+  GlueWorkflowCrawlerTriggerName1:
+    Description : name of glue workflow crawler trigger
+    Type: String 
+  GlueWorkflowJobTriggerName1:
+    Description : name of glue workflow job trigger
+    Type: String 
+
+  GlueDatabaseName2:
+    Type: String
+    Default: 'DB_NAME'
+  GlueCrawlerName2:
+    Type: String
+    Default: 'DB_NAME-crawler'
+  GlueConnectionName2:
+    Type: String
+    Default: 'glue-DB_NAME-connection'
+  GlueCrawlerExtractionPath2:
+    Description : crawler extraction path - ORACLE must use DBNAME/%, refer to docs
+    Type: String
+  GlueJobName2:
+    Description : glue etl job name
+    Type: String
+    ConstraintDescription : Alphanumeric characters only
+  GlueJobPythonScriptLocation2:
+    Description : s3 location of python script for glue job (ex. "s3://rds-glue-ora/glue-to-s3-dynamic.py")
+    Type: String
+  GlueWorkflowName2:
+    Description : name of glue workflow from crawler to job
+    Type: String 
+  GlueWorkflowCrawlerTriggerName2:
+    Description : name of glue workflow crawler trigger
+    Type: String 
+  GlueWorkflowJobTriggerName2:
+    Description : name of glue workflow job trigger
+    Type: String 
+
+Resources:
+
+########### Shared
+
+  GlueRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "glue.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonRDSFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+      RoleName: !Ref GlueRoleName
+
+  RouteTableForS3Endpoint:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref VPCID
+
+  RouteTableSubnetAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      DependsOn: RouteTableForS3Endpoint
+      Properties: 
+        RouteTableId: !GetAtt RouteTableForS3Endpoint.RouteTableId
+        SubnetId: !Ref RDSSubnetID1
+
+  S3GatewayEndpoint:
+      Type: 'AWS::EC2::VPCEndpoint'
+      DependsOn: RouteTableForS3Endpoint
+      Properties:
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal: '*'
+              Action: '*'
+              Resource: '*'
+        RouteTableIds:
+          - !GetAtt RouteTableForS3Endpoint.RouteTableId
+        ServiceName: 'com.amazonaws.us-east-1.s3'
+        VpcId: !Ref VPCID
+
+  GlueGatewayEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: '*'
+            Resource: '*'
+      ServiceName: 'com.amazonaws.us-east-1.glue'
+      VpcId: !Ref VPCID
+      VpcEndpointType: 'Interface'
+      SubnetIds: [!Ref RDSSubnetID1]
+      SecurityGroupIds: [!Ref RDSGlueSecurityGroup1]
+      PrivateDnsEnabled: true
+
+########### Glue Resources
+  GlueDatabase1:
+      Type: AWS::Glue::Database
+      Properties: 
+        CatalogId: !Ref AWS::AccountId
+        DatabaseInput: 
+          Description: 'Glue database for storing crawled data'
+          Name: !Ref GlueDatabaseName1
+
+  GlueConnection1:
+    Type: 'AWS::Glue::Connection'
+    DependsOn: GlueRole
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionType: "JDBC"
+        Name: !Ref GlueConnectionName1
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Ref RDSConnectionJDBC1
+          USERNAME: !Ref RDSDBUser1
+          PASSWORD: !Ref RDSDBPassword1
+          JDBC_ENFORCE_SSL: false
+        PhysicalConnectionRequirements:
+          SecurityGroupIdList: [!Ref RDSGlueSecurityGroup1]
+          SubnetId: !Ref RDSSubnetID1
+
+  GlueCrawler1:
+    Type: AWS::Glue::Crawler
+    DependsOn: GlueConnection1
+    Properties:
+      Name: !Ref GlueCrawlerName1
+      Role: !Ref GlueRoleName
+      DatabaseName: !Ref GlueDatabaseName1
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref GlueConnectionName1
+            Path: !Ref GlueCrawlerExtractionPath1
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "DEPRECATE_IN_DATABASE"
+
+  GlueJob1:
+    Type: AWS::Glue::Job
+    DependsOn: GlueConnection1
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Ref GlueJobPythonScriptLocation1
+        PythonVersion: 3
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--system_name": !Ref SourceSystemName1
+        "--database_name": !Ref GlueDatabaseName1
+        "--s3_raw_bucket_path": !Ref S3RawBucketPath
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      MaxRetries: 0
+      Timeout: 5
+      NumberOfWorkers: 10
+      GlueVersion: '3.0'
+      WorkerType: 'G.1X'
+      Connections: 
+        Connections:
+        - !Ref GlueConnection1
+      Name: !Ref GlueJobName1
+      Role: !Ref GlueRoleName
+
+  GlueDatabase2:
+      Type: AWS::Glue::Database
+      Properties: 
+        CatalogId: !Ref AWS::AccountId
+        DatabaseInput: 
+          Description: 'Glue database for storing crawled data'
+          Name: !Ref GlueDatabaseName2
+
+  GlueConnection2:
+    Type: 'AWS::Glue::Connection'
+    DependsOn: GlueRole
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionType: "JDBC"
+        Name: !Ref GlueConnectionName2
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Ref RDSConnectionJDBC2
+          USERNAME: !Ref RDSDBUser2
+          PASSWORD: !Ref RDSDBPassword2
+          JDBC_ENFORCE_SSL: false
+        PhysicalConnectionRequirements:
+          SecurityGroupIdList: [!Ref RDSGlueSecurityGroup2]
+          SubnetId: !Ref RDSSubnetID2
+
+  GlueCrawler2:
+    Type: AWS::Glue::Crawler
+    DependsOn: GlueConnection2
+    Properties:
+      Name: !Ref GlueCrawlerName2
+      Role: !Ref GlueRoleName
+      DatabaseName: !Ref GlueDatabaseName2
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref GlueConnectionName2
+            Path: !Ref GlueCrawlerExtractionPath2
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "DEPRECATE_IN_DATABASE"
+
+  GlueJob2:
+    Type: AWS::Glue::Job
+    DependsOn: GlueConnection2
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Ref GlueJobPythonScriptLocation2
+        PythonVersion: 3
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--system_name": !Ref SourceSystemName2
+        "--database_name": !Ref GlueDatabaseName2
+        "--s3_raw_bucket_path": !Ref S3RawBucketPath
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      MaxRetries: 0
+      Timeout: 5
+      NumberOfWorkers: 10
+      GlueVersion: '3.0'
+      WorkerType: 'G.1X'
+      Connections: 
+        Connections:
+        - !Ref GlueConnection2
+      Name: !Ref GlueJobName2
+      Role: !Ref GlueRoleName
+
+############ Workflow Resources
+
+  RunJobWorkflow1:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Description: Workflow for orchestrating job runs
+      Name: !Ref GlueWorkflowName1
+  
+  WorkflowCrawlerTrigger1:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Ref GlueWorkflowCrawlerTriggerName1
+      Type: SCHEDULED
+      Schedule: cron(0 6 * * ? *)
+      Actions:
+        - CrawlerName: !Ref GlueCrawler1
+      StartOnCreation: true
+      WorkflowName: !Ref RunJobWorkflow1
+  
+  WorkflowJobTrigger1:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Ref GlueWorkflowJobTriggerName1
+      Type: CONDITIONAL
+      Actions:
+        - JobName: !Ref GlueJob1
+      StartOnCreation: true
+      Predicate:
+        Conditions:
+          - LogicalOperator: EQUALS
+            CrawlerName: !Ref GlueCrawler1
+            CrawlState: SUCCEEDED
+      WorkflowName: !Ref RunJobWorkflow1
+
+  RunJobWorkflow2:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Description: Workflow for orchestrating job runs
+      Name: !Ref GlueWorkflowName2
+  
+  WorkflowCrawlerTrigger2:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Ref GlueWorkflowCrawlerTriggerName2
+      Type: SCHEDULED
+      Schedule: cron(0 6 * * ? *)
+      Actions:
+        - CrawlerName: !Ref GlueCrawler2
+      StartOnCreation: true
+      WorkflowName: !Ref RunJobWorkflow2
+  
+  WorkflowJobTrigger2:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Ref GlueWorkflowJobTriggerName2
+      Type: CONDITIONAL
+      Actions:
+        - JobName: !Ref GlueJob2
+      StartOnCreation: true
+      Predicate:
+        Conditions:
+          - LogicalOperator: EQUALS
+            CrawlerName: !Ref GlueCrawler2
+            CrawlState: SUCCEEDED
+      WorkflowName: !Ref RunJobWorkflow2
