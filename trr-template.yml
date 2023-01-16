@@ -1,0 +1,521 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+
+  DatalakeRawBucket:
+    Description: DataLake S3 Raw Bucket
+    Type: String
+    Default: datalake-raw-510716259290
+  DatalakeTrustedBucket:
+    Description: DataLake S3 Trusted Bucket
+    Type: String
+    Default: datalake-trusted-510716259290
+  DatalakeQuarantineBucket:
+    Description: DataLake S3 Quarantine Bucket
+    Type: String
+    Default: datalake-quarantined-510716259290
+  DatalakeRefinedBucket:
+    Description: DataLake S3 Refined Bucket
+    Type: String
+    Default: datalake-refined-510716259290
+  GlueScriptsBucket:
+    Description: DataLake S3 Scripts Bucket
+    Type: String
+    Default: enterprise-data-glue-scripts-510716259290
+  RawToS3LambdaName:
+    Description: Name of Lambda Function
+    Type: String
+    Default: test-lambda-rtt
+  GlueJobName:
+    Description: Glue ETL job name
+    Type: String
+    Default: test-glue-rtt
+  CustomEventBusName:
+    Description: Name for event bus
+    Type: String
+    Default: crossaccount_rtt_bus
+  RTTQueueName:
+    Description: Name for Queue used for Raw to Trusted
+    Type: String
+    Default: Test-Queue
+  RTTDLQueueName:
+    Description: Name for Dead-Letter-Queue used for Raw to Trusted
+    Type: String
+    Default: Test-DLQueue
+  AWSOrgID:
+    Description: Organization ID used for cross account bus policy
+    Type: String
+    Default: o-dniyuc5hi4
+
+Resources:
+
+  DatalakeGlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSGlueServiceRoleDatalake
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: Allow
+            Principal: 
+              Service: 
+                - glue.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Path: "/"
+      Policies:
+        - PolicyName: GlueKMSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource:
+                  - !Sub "arn:aws:kms::${AWS::AccountId}:key/*"
+        - PolicyName: GlueAssumeRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/AWSGlueServiceRole*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/AWSGlueServiceNotebookRole*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/AWSGlueServiceRole"
+        - PolicyName: DatalakeGlueScriptsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                Resource: 
+                  - !Sub "arn:aws:s3:::${GlueScriptsBucket}"
+                  - !Sub "arn:aws:s3:::${GlueScriptsBucket}/*"
+        - PolicyName: DatalakeBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                Resource: 
+                  - !Sub "arn:aws:s3:::${DatalakeRawBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeRawBucket}/*"
+                  - !Sub "arn:aws:s3:::${DatalakeTrustedBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeTrustedBucket}/*"   
+                  - !Sub "arn:aws:s3:::${DatalakeRefinedBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeRefinedBucket}/*"  
+                  - !Sub "arn:aws:s3:::${DatalakeQuarantineBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeQuarantineBucket}/*"  
+               
+                  
+  CustomEventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: !Ref CustomEventBusName
+
+  CustomEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties:
+      EventBusName: !Ref CustomEventBus
+      StatementId: 'MESTMTID1'
+      Action: events:PutEvents
+      Principal: '*'
+      Condition:
+        Type: StringEquals
+        Key: aws:PrincipalOrgID
+        Value: !Ref AWSOrgID
+          
+  GlueEventRuleAXS:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CustomEventBus
+      EventPattern: {
+      "source": ["aws.glue"],
+      "detail-type": ["Glue Job State Change"],
+      "detail": {
+      "jobName": ["axs-glue-job"],
+      "state": ["SUCCEEDED"]
+      }
+    }
+      Name: axs-glue-event-rule
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt DeadLetterQueue.Arn
+
+  GlueEventRuleAXSBackOffice:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CustomEventBus
+      EventPattern: {
+      "source": ["aws.glue"],
+      "detail-type": ["Glue Job State Change"],
+      "detail": {
+      "jobName": ["axs-back-office-glue-job"],
+      "state": ["SUCCEEDED"]
+      }
+    }
+      Name: axs-back-office-glue-event-rule
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt DeadLetterQueue.Arn
+
+
+  GlueEventRuleCoach:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CustomEventBus
+      EventPattern: {
+      "source": ["aws.glue"],
+      "detail-type": ["Glue Job State Change"],
+      "detail": {
+      "jobName": ["coach_tools-glue-job"],
+      "state": ["SUCCEEDED"]
+      }
+    }
+      Name: coach_tools-glue-event-rule
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt DeadLetterQueue.Arn
+
+  GlueEventRuleCCMS:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CustomEventBus
+      EventPattern: {
+      "source": ["aws.glue"],
+      "detail-type": ["Glue Job State Change"],
+      "detail": {
+      "jobName": ["ccms-glue-job"],
+      "state": ["SUCCEEDED"]
+      }
+    }
+      Name: ccms-glue-event-rule
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt DeadLetterQueue.Arn
+
+
+  AppflowEventRuleReach:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures Appflow 'END REPORT' events from Salesforce Reach Instance
+      EventPattern: {
+        "detail-type": ["AppFlow End Flow Run Report"],
+        "source": ["aws.appflow"],
+        "detail": {
+        "source": ["SALESFORCE/salesforce-reach"]
+      }
+    }
+      Name: salesforce-reach-appflow-event-rule
+      State: ENABLED
+      Targets:    
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt DeadLetterQueue.Arn
+
+
+  AppflowEventRuleCareerServices:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures Appflow 'END REPORT' events from Salesforce Career Services Instance
+      EventPattern: {
+        "detail-type": ["AppFlow End Flow Run Report"],
+        "source": ["aws.appflow"],
+        "detail": {
+        "source": ["SALESFORCE/salesforce-career-services"]
+      }
+    }
+      Name: salesforce-career-services-appflow-event-rule
+      State: ENABLED
+      Targets:    
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt DeadLetterQueue.Arn
+
+
+  AppflowEventRuleChampionships:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures Appflow 'END REPORT' events from Salesforce Championships Instance
+      EventPattern: {
+        "detail-type": ["AppFlow End Flow Run Report"],
+        "source": ["aws.appflow"],
+        "detail": {
+        "source": ["SALESFORCE/salesforce-championships"]
+      }
+    }
+      Name: salesforce-championships-appflow-event-rule
+      State: ENABLED
+      Targets:    
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt DeadLetterQueue.Arn
+
+
+  GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: 3
+        ScriptLocation: !Join [ '/', ['s3:/', !Ref GlueScriptsBucket, 's3-raw-to-trusted.py'] ]
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--source_bucket": !Ref DatalakeRawBucket
+        "--quarantine_bucket": !Ref DatalakeQuarantineBucket
+        "--trusted_bucket": !Ref DatalakeTrustedBucket
+        "--config_file_path": !Join ['/', [ !Ref GlueScriptsBucket, 'sttm_config.csv'] ]
+        "--source_system_name": none
+        "--source_system_table_name": none
+      ExecutionProperty: 
+        MaxConcurrentRuns: 50
+      GlueVersion: '3.0'
+      MaxRetries: 0
+      Timeout: 15
+      Name: !Ref GlueJobName
+      NumberOfWorkers: 10
+      Role: !Ref DatalakeGlueRole
+      WorkerType: 'G.1X'
+
+  RawToTrustedLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSGlueServiceLambdaRoleDatalake
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Path: "/"
+      Policies:
+        - PolicyName: DatalakeGlueScriptsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                Resource: 
+                  - !Sub "arn:aws:s3:::${GlueScriptsBucket}"
+                  - !Sub "arn:aws:s3:::${GlueScriptsBucket}/*"
+        - PolicyName: DatalakeRawBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                Resource: 
+                  - !Sub "arn:aws:s3:::${DatalakeRawBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeRawBucket}/*"
+                  - !Sub "arn:aws:s3:::${DatalakeTrustedBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeTrustedBucket}/*"     
+        - PolicyName: CloudWatchLogsPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:*"
+                  - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/lambda/${RawToS3LambdaName}:*"
+        - PolicyName: AllowLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:*
+              Resource: arn:aws:logs:*:*:*
+        - PolicyName: AllowSQS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:ChangeMessageVisibility
+              Resource: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+                  
+  RawToTrustedLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref RawToS3LambdaName
+      Role: !GetAtt RawToTrustedLambdaRole.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      ReservedConcurrentExecutions: 10
+      Timeout: 20
+      Environment:
+        Variables:
+          GLUE_JOB_NAME: !Ref GlueJob
+      Code:
+        ZipFile: |
+
+          import csv
+          import boto3
+          from datetime import date
+
+          # Set up logging
+          import json
+          import os
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Import Boto 3 for AWS Glue
+          import boto3
+          client = boto3.client('glue')
+
+          # Variables for the job: 
+          glueJobName = os.environ['GLUE_JOB_NAME']
+
+          # Define Lambda function
+          def lambda_handler(event, context):
+              logger.info('## INITIATED BY EVENT: ')
+              
+              response = ""
+              
+              todays_date =str(date.today()).replace("-","/")
+              s3_resource = boto3.resource('s3')
+              config_bucket_name = 'enterprise-data-glue-scripts-510716259290'
+              s3_file_name = 'sttm_config.csv'
+              s3_object = s3_resource.Object(config_bucket_name, s3_file_name)
+              
+              # read in config file
+              config_data = s3_object.get()['Body'].read().decode('utf-8').splitlines()
+            
+              systems_list = []
+              
+              lines = csv.reader(config_data)
+              headers = next(lines)
+
+              # store unique system names
+              for line in lines:
+                  if 'salesforce' in line[0]:
+                      if line[2] not in systems_list:
+                          systems_list.append(line[2])
+                  else:
+                      if line[0] not in systems_list:
+                          systems_list.append(line[0])
+            
+              
+              if 'Records' in event:
+                  temp_event = json.loads(event['Records'][0]['body'])
+                  print(temp_event)
+                  
+                  if 'detail' in temp_event.keys() and temp_event['source'] == 'aws.appflow': # Salesforce event
+                      appflow_source = temp_event['detail']['source']
+                      logger.info(temp_event['detail'])
+                      
+                      if 'salesforce' in appflow_source:
+                          system_name = (appflow_source.split('/')[1]).lower()
+                          system_table_name = (temp_event['detail']['flow-name']).lower()
+                          
+                          if system_table_name in systems_list:
+                              print("Processing: ", system_name, " object: ", system_table_name)
+                              response = client.start_job_run(JobName = glueJobName,
+                                              Arguments= {'--source_system_name': system_name,
+                                                          '--source_system_table_name': system_table_name})
+                  
+                              logger.info('## STARTED CLEANING GLUE JOB: ' + glueJobName)
+                              logger.info('## GLUE JOB RUN ID: ' + response['JobRunId'])
+                              
+                          else:
+                              response = "skip"
+                              print("Not processing: ", system_table_name)
+                          
+                  else:
+                      
+                      system_name = temp_event['detail']['jobName'].split('-glue-job')[0]
+                    
+                      if system_name in systems_list:
+                          
+                          print("Processing: ", system_name)
+                          response = client.start_job_run(JobName = glueJobName,
+                                            Arguments= {'--source_system_name': system_name})
+                                          
+                          logger.info('## STARTED CLEANING GLUE JOB: ' + glueJobName)
+                          logger.info('## GLUE JOB RUN ID: ' + response['JobRunId'])
+                              
+                      else:
+                          response = "skip"
+                          print("Not processing: ", system_name)
+
+              return response
+
+
+
+  RawToTrustedLambdaFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      EventSourceArn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+      FunctionName: !GetAtt RawToTrustedLambdaFunction.Arn
+
+  EventBridgeToSQSToLambdaQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Ref RTTQueueName
+      RedrivePolicy: 
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  QueueEventBridgePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: SQS:SendMessage
+            Resource: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: SQS:SendMessage
+            Resource: !GetAtt DeadLetterQueue.Arn
+      Queues:
+        - !Ref EventBridgeToSQSToLambdaQueue
+        - !Ref DeadLetterQueue
+        
+  DeadLetterQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Ref RTTDLQueueName
+      MessageRetentionPeriod: 1209600

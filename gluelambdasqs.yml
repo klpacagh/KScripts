@@ -1,0 +1,276 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+
+  DatalakeRawBucket:
+    Description: DataLake S3 Raw Bucket
+    Type: String
+    Default: datalake-raw-510716259290
+  DatalakeTrustedBucket:
+    Description: DataLake S3 Trusted Bucket
+    Type: String
+    Default: datalake-trusted-510716259290
+  DatalakeScriptsBucket:
+    Description: DataLake S3 Scripts Bucket
+    Type: String
+    Default: enterprise-data-glue-scripts-510716259290
+  RawToS3LambdaName:
+    Description: Name of Lambda Function
+    Type: String
+    Default: test-lambda-rtt
+  GlueJobName:
+    Description: Glue ETL job name
+    Type: String
+    Default: test-glue-rtt
+  GlueRoleName:
+    Description: Glue Role Name
+    Type: String
+    Default: glue-rds-s3-role
+  CustomEventBusName:
+    Description: Name for event bus
+    Type: String
+    Default: rawtotrusted_bus
+
+Resources:
+
+  CustomEventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: !Ref CustomEventBusName
+
+  CustomEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties:
+      EventBusName: !Ref CustomEventBus
+      StatementId: 'MESTMTID1'
+      Action: events:PutEvents
+      Principal: '*'
+      Condition:
+        Type: StringEquals
+        Key: aws:PrincipalOrgID
+        Value: "o-dniyuc5hi4"
+          
+            
+  GlueEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CustomEventBus
+      EventPattern: {
+      "source": ["aws.glue"],
+      "detail-type": ["Glue Job State Change"],
+      "detail": {
+      "jobName": ["dummy-job"],
+      "state": ["SUCCEEDED"]
+      }
+    }
+      Name: dummy-event-rule
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+
+  AppflowEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Captures Appflow 'END REPORT' events from Salesforce Instances
+      EventBusName: !Ref CustomEventBus
+      EventPattern: {
+        "detail-type": ["AppFlow End Flow Run Report"],
+        "source": ["aws.appflow"],
+        "detail": {
+        "source": ["SALESFORCE/salesforce-career-services"]
+      }
+    }
+      Name: appflow-event-rule
+      State: ENABLED
+      Targets:    
+        - Arn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+          Id: !GetAtt EventBridgeToSQSToLambdaQueue.QueueName
+
+
+  GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: 3
+        ScriptLocation: !Join [ '/', ['s3:/', !Ref DatalakeScriptsBucket, 's3-raw-to-trusted.py'] ]
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--source_bucket": datalake-raw-510716259290
+        "--quarantine_bucket": non-trusted-data-quarantine
+        "--trusted_bucket": datalake-trusted-510716259290
+        "--config_file_path": enterprise-data-glue-scripts-510716259290/sttm_config.csv
+        "--source_system_name": none
+        "--source_system_table_name": none
+      ExecutionProperty: 
+        MaxConcurrentRuns: 50
+      GlueVersion: '3.0'
+      MaxRetries: 0
+      Timeout: 15
+      Name: !Ref GlueJobName
+      NumberOfWorkers: 10
+      Role: !Ref GlueRoleName
+      WorkerType: 'G.1X'
+
+  RawToTrustedLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSGlueServiceLambdaRoleDatalake
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Path: "/"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonRDSFullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+      Policies:
+        - PolicyName: DatalakeGlueScriptsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                Resource: 
+                  - !Sub "arn:aws:s3:::${DatalakeScriptsBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeScriptsBucket}/*"
+        - PolicyName: DatalakeRawBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                Resource: 
+                  - !Sub "arn:aws:s3:::${DatalakeRawBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeRawBucket}/*"
+                  - !Sub "arn:aws:s3:::${DatalakeTrustedBucket}"
+                  - !Sub "arn:aws:s3:::${DatalakeTrustedBucket}/*"     
+        - PolicyName: CloudWatchLogsPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:*"
+                  - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/lambda/${RawToS3LambdaName}:*"
+        - PolicyName: AllowLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:*
+              Resource: arn:aws:logs:*:*:*
+        - PolicyName: AllowSQS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:ChangeMessageVisibility
+              Resource: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+                  
+  RawToTrustedLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref RawToS3LambdaName
+      Role: !GetAtt RawToTrustedLambdaRole.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      ReservedConcurrentExecutions: 10
+      Timeout: 20
+      Environment:
+        Variables:
+          GLUE_JOB_NAME: !Ref GlueJob
+      Code:
+        ZipFile: |
+
+          # Set up logging
+          import json
+          import os
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Import Boto 3 for AWS Glue
+          import boto3
+          client = boto3.client('glue')
+
+          # Variables for the job: 
+          glueJobName = os.environ['GLUE_JOB_NAME']
+
+          # Define Lambda function
+          def lambda_handler(event, context):
+              logger.info('## INITIATED BY EVENT: ')
+              
+              temp_event = json.loads(event['Records'][0]['body'])
+              
+              print(temp_event)
+              
+              if 'detail' in temp_event.keys() and temp_event['source'] == 'aws.appflow': # Salesforce event
+              
+                  appflow_source = temp_event['detail']['source']
+                  logger.info(temp_event['detail'])
+                  if 'salesforce' in appflow_source:
+                      system_name = (appflow_source.split('/')[1]).lower()
+                      system_table_name = (temp_event['detail']['source-object']).lower()
+                      
+                      print(system_name)
+                      print(system_table_name)
+                      response = client.start_job_run(JobName = glueJobName,
+                                      Arguments= {'--source_system_name': system_name,
+                                                  '--source_system_table_name': system_table_name})
+
+              else:
+                system_name = temp_event['detail']['jobName'].split('-')[0]
+                
+                response = client.start_job_run(JobName = glueJobName,
+                                    Arguments= {'--source_system_name': system_name})
+                          
+                          
+              logger.info('## STARTED CLEANING GLUE JOB: ' + glueJobName)
+              logger.info('## GLUE JOB RUN ID: ' + response['JobRunId'])
+              
+              
+              return response
+
+
+  RawToTrustedLambdaFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      EventSourceArn: !GetAtt EventBridgeToSQSToLambdaQueue.Arn
+      FunctionName: !GetAtt RawToTrustedLambdaFunction.Arn
+
+  EventBridgeToSQSToLambdaQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 'Test-Queue'
+      RedrivePolicy: 
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  DeadLetterQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 'DLQueueForRawToTrusted'
+      MessageRetentionPeriod: 1209600

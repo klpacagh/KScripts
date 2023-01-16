@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion : '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Provision PGA.org glue related components to establish ETL process
+
+Parameters:
+  VPCSubnetID1:
+    Type: String
+    Description: Subnet 1
+    Default: subnet-0dac91b87fe600f21
+  VPCSubnetID2:
+    Type: String
+    Description: Subnet 2
+    Default: subnet-0a16fbfa496b14b74
+  VPCSubnetID3:
+    Type: String
+    Description: Subnet 3
+    Default: subnet-0a2fc5bad58bb7cb1
+  VPCSecurityGroup:
+    Type: String
+    Description: VPC Security Group
+    Default: sg-04cf55bbdf5858bf4
+  RouteTableIDMain:
+    Type: String
+    Description: Route Table Main
+    Default: rtb-03752b59eb2dbeae5
+  RouteTableID1:
+    Type: String
+    Description: Route Table 1
+    Default: rtb-01534e624ab239d7f
+  RouteTableID2:
+    Type: String
+    Description: Route Table 2
+    Default: rtb-0126a36ecb67e4c8d
+  RouteTableID3:
+    Type: String
+    Description: Route Table 3
+    Default: rtb-0ea95c9cd51ad8955	
+
+Resources:
+
+  S3GatewayEndpoint:
+      Type: 'AWS::EC2::VPCEndpoint'
+      Properties:
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal: '*'
+              Action: '*'
+              Resource: '*'
+        RouteTableIds:
+          - !Ref RouteTableIDMain
+          - !Ref RouteTableID1
+          - !Ref RouteTableID2
+          - !Ref RouteTableID3
+        ServiceName: 'com.amazonaws.us-east-1.s3'
+        VpcId: !ImportValue DefaultVPCId
+
+  GlueGatewayEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: '*'
+            Resource: '*'
+      ServiceName: 'com.amazonaws.us-east-1.glue'
+      VpcId: !ImportValue DefaultVPCId
+      VpcEndpointType: 'Interface'
+      SubnetIds: [!Ref VPCSubnetID1, !Ref VPCSubnetID2, !Ref VPCSubnetID3]
+      SecurityGroupIds: [!Ref VPCSecurityGroup]
+      PrivateDnsEnabled: true

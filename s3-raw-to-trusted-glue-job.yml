@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+
+  GlueRoleName:
+    Description: Glue Role Name
+    Type: String
+  LogLevel:
+    Type: String
+    Description: Log Level
+    Default: DEBUG
+  GlueScriptsBucket:
+    Type: String
+    Description: S3 Location of Python script for Glue job
+  GlueJobName:
+    Description: Glue ETL job name
+    Type: String
+    ConstraintDescription: Alphanumeric characters only
+
+
+Resources:
+
+  GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: 3
+        ScriptLocation: !Join [ '/', ['s3:/', !Ref GlueScriptsBucket, 's3-raw-to-trusted.py'] ]
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--source_bucket": datalake-raw-510716259290
+        "--quarantine_bucket": non-trusted-data-quarantine
+        "--trusted_bucket": datalake-trusted-510716259290
+        "--config_file_path": enterprise-data-glue-scripts-510716259290/sttm_config.csv
+        "--source_system_name": none
+      ExecutionProperty: 
+        MaxConcurrentRuns: 50
+      GlueVersion: '3.0'
+      MaxRetries: 0
+      Timeout: 15
+      Name: !Ref GlueJobName
+      NumberOfWorkers: 10
+      Role: !Ref GlueRoleName
+      WorkerType: 'G.1X'
