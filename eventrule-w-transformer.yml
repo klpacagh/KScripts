@@ -1,0 +1,33 @@
+
+Resources:
+
+  TestRawToTrustedQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: test-rtt-queue
+
+  TestAppflowEventRuleCareerServices:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: kevin-abs-rules
+        State: ENABLED
+        Description: Captures Appflow 'END REPORT' events from Salesforce Career Services Instance
+        EventPattern: {
+          "detail-type": ["AppFlow End Flow Run Report"],
+          "source": ["aws.appflow"],
+          "detail": {
+            "source": ["SALESFORCE/salesforce-career-services"]
+          }
+        }
+        Targets:    
+          - Arn: !GetAtt TestRawToTrustedQueue.Arn
+            Id: !GetAtt TestRawToTrustedQueue.QueueName
+            InputTransformer:
+              InputPathsMap:
+                "source_system_name" : "$.detail.source"
+                "source_system_table_name" : "$.detail.flow-name"
+              InputTemplate: |
+                  {
+                    "source_system_name" : <source_system_name>,
+                    "source_system_table_name" : <source_system_table_name>
+                  }

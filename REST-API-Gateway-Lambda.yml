@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  LogLevel:
+    Type: String
+    Description: Log Level
+    Default: DEBUG
+  ApiGatewayName:
+    Description: Glue Role Name
+    Type: String
+    Default: sync-external-systems-datalake
+  IterableApiGatewayResourceName:
+    Description: Iterable Resource Role Name
+    Type: String
+    Default: iterable_webhook
+  PipelineRoleName:
+    Description: Pipeline Role Name
+    Type: String
+    Default: PipelineLambdaRoleDatalake
+  RawBucket:
+    Type: String
+    Description: Raw Bucket Name
+
+
+Resources:
+
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      EndpointConfiguration:
+        Types:
+          - EDGE
+      Name: !Ref ApiGatewayName
+
+  IterableResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: !Ref IterableApiGatewayResourceName
+      RestApiId: !Ref RestApi
+
+  IterableMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        ConnectionType: INTERNET
+        Credentials: !GetAtt ApiGatewayRole.Arn
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${IterableProcessingFunction.Arn}/invocations"
+      ResourceId: !Ref IterableResource
+      RestApiId: !Ref RestApi
+
+  ApiGatewayRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: AWSAPIGatewayWebhookDatalake
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Principal:
+                Service:
+                  - apigateway.amazonaws.com
+        ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+        Policies:
+          - PolicyName: !Sub "${ApiGatewayName}-InvokeFunctionPolicy"
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                  Resource:
+                    - !GetAtt IterableProcessingFunction.Arn
+
+  ApiGwAccountConfig:
+    Type: "AWS::ApiGateway::Account"
+    Properties:
+      CloudWatchRoleArn: !GetAtt "ApiGatewayRole.Arn"
+
+  IterableDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - IterableMethod
+    Properties:
+      RestApiId: !Ref RestApi
+      StageName: 'Prod'
+      StageDescription:
+        Description: Stage - Prod
+        LoggingLevel: INFO
+        MetricsEnabled: True
+        MethodSettings:
+          - ResourcePath: "/*"
+            HttpMethod: "*"
+            LoggingLevel: INFO
+            MetricsEnabled: True
+
+  IterableStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref IterableDeployment
+      RestApiId: !Ref RestApi
+      StageName: Stage
+
+  IterableProcessingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      MemorySize: 128
+      Timeout: 20
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          RAW_BUCKET: !Ref RawBucket
+          SOURCE_PARENT_NAME: iterable_webhook
+      Code:
+        ZipFile: |
+
+          import os
+          import logging
+          import json
+          import boto3
+          from datetime import date
+
+          # Set up logging
+
+          log = logging.getLogger(__name__)
+          log_level = os.environ.get('LOG_LEVEL')
+          if log_level:
+              log.setLevel(log_level)
+
+          def lambda_handler(event, context):
+              log.info(f'event: {event}')
+
+              raw_bucket_name = os.environ.get('RAW_BUCKET')
+              parent_folder = os.environ.get('SOURCE_PARENT_NAME')
+              todays_date =str(date.today()).replace("-","/")
+              
+              json_temp = json.loads(event["body"])
+              event_name = json_temp["eventName"]
+              message_id = json_temp["dataFields"]["messageId"]
+              file_name = "{}_{}.json".format(event_name,message_id)
+              key_location = "{}/{}_{}/{}/{}".format(parent_folder,parent_folder,event_name,todays_date,file_name)
+              log.info(f'key_location: {evenkey_locationt}')
+              
+              client = boto3.client('s3')
+              response = client.put_object( 
+                  Bucket=raw_bucket_name,
+                  Body=json.dumps(json_temp),
+                  Key=key_location
+              )
+              
+              return {
+                  'statusCode': 200
+              }
+
+      FunctionName: !Sub "${ApiGatewayName}-function"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/${PipelineRoleName}"

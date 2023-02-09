@@ -1,0 +1,495 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  LogLevel:
+    Type: String
+    Default: DEBUG
+  CoachDBInstance:
+    Description: Coach Tools DB Instance Name
+    Type: String
+  CCMSDBInstance:
+    Description: CCMS DB Instance Name
+    Type: String
+  CrossAccountBusName:
+    Description: Cross Account Event Bus Name
+    Type: String
+    Default: crossaccount-rtt-bus
+  RTTGlueJobName:
+    Description: Raw to Trusted Glue Job Name
+    Type: String
+    Default: rtt-glue-job
+  TTDMGlueJobName:
+    Description: Trusted to Refined Glue Job Name
+    Type: String
+    Default: ttr-glue-job
+  TTRGlueJobName:
+    Description: Trusted to Refined Glue Job Name
+    Type: String
+    Default: ttdm-glue-job
+  AXSGlueJobName:
+    Description: AXS Glue Job Name
+    Type: String
+    Default: axs-glue-job
+  AXSBackOfficeGlueJobName:
+    Description: AXS Back Office Glue Job Name
+    Type: String
+    Default: axs-back-office-glue-job
+  CoachToolsGlueJobName:
+    Description: Coach Tools Glue Job Name
+    Type: String
+    Default: coach_tools-glue-job
+  CCMSGlueJobName:
+    Description: CCMS Glue Job Name
+    Type: String
+    Default: ccms-glue-job
+  TwoWeeks:
+    Description: 14 days in seconds
+    Type: Number
+    Default: 1209600
+  
+Resources:
+  GlueEventRuleAXS:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: axs-glue-event-rule
+      State: ENABLED
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CrossAccountBusName
+      Targets:
+        - Arn: !GetAtt RawToTrustedQueue.Arn
+          Id: !GetAtt RawToTrustedQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt RawToTrustedDLQ.Arn
+          Input:
+            !Sub |
+              {
+                "jobName": "${AXSGlueJobName}",
+                "dbInstance": "elv_pgaamerica"
+              }
+      EventPattern: !Sub |
+        {
+          "source": ["aws.glue"],
+          "detail-type": ["Glue Job State Change"],
+          "detail": {
+            "jobName": ["${AXSGlueJobName}"],
+            "state": ["SUCCEEDED"]
+          }
+        }
+
+  GlueEventRuleAXSBackOffice:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: axs-back-office-glue-event-rule
+      State: ENABLED
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CrossAccountBusName
+      Targets: 
+        - Arn: !GetAtt RawToTrustedQueue.Arn
+          Id: !GetAtt RawToTrustedQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt RawToTrustedDLQ.Arn
+          Input:
+            !Sub |
+              {
+                "jobName": "${AXSBackOfficeGlueJobName}",
+                "dbInstance": "veritix/elv_pgaamerica"
+              }
+      EventPattern: !Sub |
+        {
+          "source": ["aws.glue"],
+          "detail-type": ["Glue Job State Change"],
+          "detail": {
+            "jobName": ["${AXSBackOfficeGlueJobName}"],
+            "state": ["SUCCEEDED"]
+          }
+        }
+
+  GlueEventRuleCoach:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: coach_tools-glue-event-rule
+      State: ENABLED
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CrossAccountBusName
+      Targets: 
+        - Arn: !GetAtt RawToTrustedQueue.Arn
+          Id: !GetAtt RawToTrustedQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt RawToTrustedDLQ.Arn
+          Input:
+            !Sub |
+              {
+                "jobName": "${CoachToolsGlueJobName}",
+                "dbInstance": "${CoachDBInstance}"
+              }
+      EventPattern: !Sub |
+        {
+          "source": ["aws.glue"],
+          "detail-type": ["Glue Job State Change"],
+          "detail": {
+            "jobName": ["${CoachToolsGlueJobName}"],
+            "state": ["SUCCEEDED"]
+          }
+        }
+
+  GlueEventRuleCCMS:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ccms-glue-event-rule
+      State: ENABLED
+      Description: Captures glue job 'SUCCESS' events from Glue Ingestion Jobs 
+      EventBusName: !Ref CrossAccountBusName
+      Targets: 
+        - Arn: !GetAtt RawToTrustedQueue.Arn
+          Id: !GetAtt RawToTrustedQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt RawToTrustedDLQ.Arn
+          Input:
+            !Sub |
+              {
+                "jobName": "${CCMSGlueJobName}",
+                "dbInstance": "${CCMSDBInstance}"
+              }
+      EventPattern: !Sub |
+        {
+          "source": ["aws.glue"],
+          "detail-type": ["Glue Job State Change"],
+          "detail": {
+            "jobName": ["${CCMSGlueJobName}"],
+            "state": ["SUCCEEDED"]
+          }
+        }
+
+  AppflowEventRuleReach:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: salesforce-reach-appflow-event-rule
+      State: ENABLED
+      Description: Captures Appflow 'END REPORT' events from Salesforce Reach Instance
+      EventPattern: {
+        "detail-type": ["AppFlow End Flow Run Report"],
+        "source": ["aws.appflow"],
+        "detail": {
+          "source": ["SALESFORCE/salesforce-reach"]
+        }
+      }
+      Targets:    
+        - Arn: !GetAtt RawToTrustedQueue.Arn
+          Id: !GetAtt RawToTrustedQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt RawToTrustedDLQ.Arn
+          InputTransformer:
+            InputPathsMap:
+              "source_system_name" : "$.detail.source"
+              "source_system_table_name" : "$.detail.flow-name"
+            InputTemplate: |
+                {
+                  "source_system_name" : <source_system_name>,
+                  "source_system_table_name" : <source_system_table_name>
+                }
+
+  AppflowEventRuleCareerServices:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: salesforce-career-services-appflow-event-rule
+      State: ENABLED
+      Description: Captures Appflow 'END REPORT' events from Salesforce Career Services Instance
+      EventPattern: {
+        "detail-type": ["AppFlow End Flow Run Report"],
+        "source": ["aws.appflow"],
+        "detail": {
+          "source": ["SALESFORCE/salesforce-career-services"]
+        }
+      }
+      Targets:    
+        - Arn: !GetAtt RawToTrustedQueue.Arn
+          Id: !GetAtt RawToTrustedQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt RawToTrustedDLQ.Arn
+          InputTransformer:
+            InputPathsMap:
+              "source_system_name" : "$.detail.source"
+              "source_system_table_name" : "$.detail.flow-name"
+            InputTemplate: |
+                {
+                  "source_system_name" : <source_system_name>,
+                  "source_system_table_name" : <source_system_table_name>
+                }
+
+  AppflowEventRuleChampionships:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: salesforce-championships-appflow-event-rule
+      State: ENABLED
+      Description: Captures Appflow 'END REPORT' events from Salesforce Championships Instance
+      EventPattern: {
+        "detail-type": ["AppFlow End Flow Run Report"],
+        "source": ["aws.appflow"],
+        "detail": {
+          "source": ["SALESFORCE/salesforce-championships"]
+        }
+      }
+      Targets:    
+        - Arn: !GetAtt RawToTrustedQueue.Arn
+          Id: !GetAtt RawToTrustedQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt RawToTrustedDLQ.Arn
+          InputTransformer:
+            InputPathsMap:
+              "source_system_name" : "$.detail.source"
+              "source_system_table_name" : "$.detail.flow-name"
+            InputTemplate: |
+                {
+                  "source_system_name" : <source_system_name>,
+                  "source_system_table_name" : <source_system_table_name>
+                }
+                
+  RTTEventRuleForTRR:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: rtt-glue-event-rule
+      State: ENABLED
+      Description: Captures glue job 'SUCCESS' events from RTT Job to Trigger TRR Job
+      Targets: 
+        - Arn: !GetAtt TrustedToRefinedQueue.Arn
+          Id: !GetAtt TrustedToRefinedQueue.QueueName
+          DeadLetterConfig: 
+            Arn: !GetAtt TrustedToRefinedDLQ.Arn
+      EventPattern: !Sub |
+        {
+          "source": ["aws.glue"],
+          "detail-type": ["Glue Job State Change"],
+          "detail": {
+            "jobName": ["${RTTGlueJobName}"],
+            "state": ["SUCCEEDED"]
+          }
+        }
+
+  RawToTrustedDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: rtt-dlq
+      MessageRetentionPeriod: !Ref TwoWeeks
+
+  RawToTrustedQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: rtt-queue
+      RedrivePolicy: 
+        deadLetterTargetArn: !GetAtt RawToTrustedDLQ.Arn
+        maxReceiveCount: 5
+
+  RawToTrustedQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service: events.amazonaws.com
+            Action: SQS:SendMessage
+            Resource: !GetAtt RawToTrustedQueue.Arn
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: SQS:SendMessage
+            Resource: !GetAtt RawToTrustedDLQ.Arn
+      Queues:
+        - !Ref RawToTrustedQueue
+        - !Ref RawToTrustedDLQ
+
+  TrustedToRefinedDLQ: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ttr-dlq
+      MessageRetentionPeriod: !Ref TwoWeeks
+
+  TrustedToRefinedQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ttr-queue
+      RedrivePolicy: 
+        deadLetterTargetArn: !GetAtt TrustedToRefinedDLQ.Arn
+        maxReceiveCount: 5
+      VisibilityTimeout: 120
+      DelaySeconds: 300
+
+  TrustedToRefinedQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service: events.amazonaws.com
+            Action: SQS:SendMessage
+            Resource: !GetAtt TrustedToRefinedQueue.Arn
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: SQS:SendMessage
+            Resource: !GetAtt TrustedToRefinedDLQ.Arn
+      Queues:
+        - !Ref TrustedToRefinedQueue
+        - !Ref TrustedToRefinedDLQ
+
+  RawToTrustedLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: RawToTrustedLambdaRoleDatalake
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Path: /
+      Policies:
+        - PolicyName: RawToTrustedDatalakeBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                Resource:
+                  - !ImportValue GLUE-SCRIPTS-BUCKET-ARN
+                  - !Sub 
+                    - "${GlueScriptsBucketArn}/*"
+                    - GlueScriptsBucketArn: !ImportValue GLUE-SCRIPTS-BUCKET-ARN
+                  - !ImportValue DATALAKE-RAW-BUCKET-ARN
+                  - !Sub 
+                    - "${DatalakeRawBucketArn}/*"
+                    - DatalakeRawBucketArn: !ImportValue DATALAKE-RAW-BUCKET-ARN
+                  - !ImportValue DATALAKE-TRUSTED-BUCKET-ARN
+                  - !Sub 
+                    - "${DatalakeTrustedBucketArn}/*"
+                    - DatalakeTrustedBucketArn: !ImportValue DATALAKE-TRUSTED-BUCKET-ARN
+        - PolicyName: AllowRawToTrustedLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - logs:*
+              Resource: arn:aws:logs:*:*:*
+        - PolicyName: AllowRawToTrustedSQS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+                - sqs:ChangeMessageVisibility
+              Resource: 
+                - !GetAtt RawToTrustedQueue.Arn
+
+  TrustedToRefinedLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: TrustedToRefinedLambdaRoleDatalake
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Path: /
+      Policies:
+        - PolicyName: TrustedToRefinedDatalakeBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                Resource:
+                  - !ImportValue GLUE-SCRIPTS-BUCKET-ARN
+                  - !Sub 
+                    - "${GlueScriptsBucketArn}/*"
+                    - GlueScriptsBucketArn: !ImportValue GLUE-SCRIPTS-BUCKET-ARN
+                  - !ImportValue DATALAKE-TRUSTED-BUCKET-ARN
+                  - !Sub 
+                    - "${DatalakeTrustedBucketArn}/*"
+                    - DatalakeTrustedBucketArn: !ImportValue DATALAKE-TRUSTED-BUCKET-ARN
+                  - !ImportValue DATALAKE-REFINED-BUCKET-ARN
+                  - !Sub 
+                    - "${DatalakeRefinedBucketArn}/*"
+                    - DatalakeRefinedBucketArn: !ImportValue DATALAKE-REFINED-BUCKET-ARN
+        - PolicyName: AllowTrustedToRefinedLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - logs:*
+              Resource: arn:aws:logs:*:*:*
+        - PolicyName: AllowTrustedToRefinedSQS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+                - sqs:ChangeMessageVisibility
+              Resource: 
+                - !GetAtt TrustedToRefinedQueue.Arn
+
+  RawToTrustedLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt RawToTrustedLambdaRole.Arn
+      Runtime: python3.9
+      Handler: src.raw_to_trusted.lambda_handler
+      ReservedConcurrentExecutions: 10
+      Timeout: 20
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          GLUE_JOB_NAME: !Ref RTTGlueJobName
+          CONFIG_BUCKET_NAME: !ImportValue GLUE-SCRIPTS-BUCKET
+
+  RawToTrustedLambdaFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt RawToTrustedQueue.Arn
+      FunctionName: !GetAtt RawToTrustedLambdaFunction.Arn
+
+  TrustedToRefinedLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt TrustedToRefinedLambdaRole.Arn
+      Runtime: python3.9
+      Handler: src.trusted_to_refined.lambda_handler
+      ReservedConcurrentExecutions: 10
+      Timeout: 60
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          RTT_JOB_NAME: !Ref RTTGlueJobName
+          TTDM_JOB_NAME: !Ref TTDMGlueJobName
+          TTR_JOB_NAME: !Ref TTRGlueJobName
+          CONFIG_BUCKET_NAME: !ImportValue GLUE-SCRIPTS-BUCKET
+          TRUSTED_BUCKET_NAME: !ImportValue DATALAKE-TRUSTED-BUCKET
+
+  TrustedToRefinedLambdaFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt TrustedToRefinedQueue.Arn
+      FunctionName: !GetAtt TrustedToRefinedLambdaFunction.Arn

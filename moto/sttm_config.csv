@@ -1,0 +1,44 @@
+source_system,schema,source_table,source_column,target_column,target_column_type
+ccms,pga,cen_cust_cyber,cyber_txt,email,string
+ccms,pga,cen_cust_phone,phone_num,phonenumber,string
+ccms,pga,cen_cust_mast,first_nm,firstname,string
+ccms,pga,cen_cust_mast,last_nm,lastname,string
+ccms,pga,cen_cust_mast,birth_dt,birthdate,date
+ccms,pga,cen_cust_addr,street1,address1,string
+ccms,pga,cen_cust_addr,street2,address2,string
+ccms,pga,cen_cust_addr,city_nm,city,string
+ccms,pga,cen_cust_addr,state_cd,usstate,string
+ccms,pga,cen_cust_addr,country_nm,country,string
+ccms,pga,cen_cust_addr,postal_cd,zippostal,string
+ccms,pga,evt_reg_tourn_info,home_course,homecourse,string
+ccms,pga,evt_reg_tourn_info,handicap,golfhandicap,integer
+ccms,pga,cen_cust_mast,sex,gender,string
+ccms,pga,evt_reg_hdr,null,null,null
+coach_tools,reporting,contacts,email,email,string
+coach_tools,reporting,contacts,phone_number,phonenumber,string
+coach_tools,public,push_notification_device_tokens,devices,devices,string
+coach_tools,reporting,accounts,null,null,null
+coach_tools,reporting,payment_accounts,null,null,null
+coach_tools,reporting,students,first_name,firstname,string
+coach_tools,reporting,students,last_name,lastname,string
+coach_tools,reporting,contacts,address1,address1,string
+coach_tools,reporting,contacts,address2,address2,string
+coach_tools,reporting,contacts,city,city,string
+coach_tools,reporting,contacts,state,usstate,string
+coach_tools,reporting,contacts,zip,zippostal,string
+coach_tools,public,coach_connections,inferred_data,iscoached,boolean
+coach_tools,reporting,demographic_profiles,gender,gender,string
+coach_tools,reporting,representatives,relationship_type,juniorparent,boolean
+salesforce-career-services,null,salesforce-career-services-contact,email,email,string
+salesforce-career-services,null,salesforce-career-services-contact,phone,phonenumber,string
+salesforce-career-services,null,salesforce-career-services-contact,mobilephone,phonenumber,string
+salesforce-career-services,null,salesforce-career-services-contact,homephone,phonenumber,string
+salesforce-career-services,null,salesforce-career-services-contact,firstname,firstname,string
+salesforce-career-services,null,salesforce-career-services-contact,lastname,lastname,string
+salesforce-career-services,null,salesforce-career-services-contact,birthdate,birthdate,string
+salesforce-career-services,null,salesforce-career-services-contact,mailing street,address1,string
+salesforce-career-services,null,salesforce-career-services-contact,mailing city,city,string
+salesforce-career-services,null,salesforce-career-services-contact,mailing state/province,usstate,string
+salesforce-career-services,null,salesforce-career-services-contact,mailing country,country,string
+salesforce-career-services,null,salesforce-career-services-contact,mailing zip/postal code,zippostal,string
+salesforce-career-services,null,salesforce-career-services-contact,gender,gender,string

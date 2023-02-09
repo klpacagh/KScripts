@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion : '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Create REST API Ingestion framework for external systems
+
+Parameters:
+  LogLevel:
+    Type: String
+    Description: Log Level
+    Default: DEBUG
+  IterableApiGatewayResourceName:
+    Description: Iterable Resource Role Name
+    Type: String
+    Default: iterable_webhook
+  PipelineRoleName:
+    Description: Pipeline Role Name
+    Type: String
+    Default: RawToTrustedLambdaRoleDatalake
+  RawBucket:
+    Type: String
+    Description: Raw Bucket Name
+    Default: datalake-raw-510716259290
+
+Resources:
+
+  ApiGatewayCWRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: AWSAPIGatewayWebhookDatalake
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Principal:
+                Service:
+                  - apigateway.amazonaws.com
+        ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGwAccountConfig:
+    Type: "AWS::ApiGateway::Account"
+    Properties:
+      CloudWatchRoleArn: !GetAtt "ApiGatewayCWRole.Arn"
+
+
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      MethodSettings:
+        - LoggingLevel: INFO
+          ResourcePath: '/*'
+          HttpMethod: '*'
+
+  IterableProcessingFunction:
+      Type: AWS::Serverless::Function
+      Properties:
+        Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/${PipelineRoleName}"
+        Runtime: python3.9
+        CodeUri: .
+        Handler: src.lambda_function.lambda_handler
+        MemorySize: 128
+        Timeout: 20
+        Environment:
+          Variables:
+            LOG_LEVEL: !Ref LogLevel
+            RAW_BUCKET: !Ref RawBucket
+            SOURCE_PARENT_NAME: iterable_webhook
+            PYTHONPATH: ./.venv/lib/python3.9/site-packages/
+        Events:
+          Webhook:
+            Type: Api
+            Properties:
+              Method: POST
+              Path: "/iterable_webhook"
+              RestApiId:
+                Ref: ApiGatewayApi
