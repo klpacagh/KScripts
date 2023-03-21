@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  CrossAccountBus:
+    Type: String
+    Description: Name of cross account bus in eventbridge
+    Default: crossaccount-rtt-bus
+
+Resources:
+  KevRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: KevsTestRole
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Path: /
+      Policies:
+        - PolicyName: AllowEventBridgeListRules
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - events:ListRules
+              Resource: 
+                - "*"
+        - PolicyName: AllowEventBridgeListTargetsByRule
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - events:ListTargetsByRule
+              Resource: 
+                - !Join [ "", [  !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/", !Ref CrossAccountBus, "/*" ] ]

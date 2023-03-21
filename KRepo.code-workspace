@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../CS6300-Projects"
+		}
+	],
+	"settings": {
+		"git.ignoreLimitWarning": true
+	}
+}

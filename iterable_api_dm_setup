@@ -1,0 +1,68 @@
+-- select * from raw_bucket_athena.iterable_api_email_clicks limit 100 -- templateid, messageid, campaignid, email
+-- select * from raw_bucket_athena.iterable_api_email_opens limit 100 -- email, messageid, templateid, campaignid, contentid
+-- select * from raw_bucket_athena.iterable_api_email_subscribes limit 100 --email, emaillistids
+-- select * from raw_bucket_athena.iterable_api_lists limit 100 -- id join emaillistids from email_subscribes
+-- select * from raw_bucket_athena.iterable_api_message_types limit 100 --messageId
+-- select * from raw_bucket_athena.iterable_api_users limit 100 -- email, name
+-- select * from raw_bucket_athena.iterable_api_campaigns limit 100; --campaignid, templateid, listids
+
+    --campaign --> lists --> emailsSub --> users
+    union
+    --campaign --> lists --> emailsUnSub --> users
+union
+    --campaign --> email clicks --> messages/users
+    union
+    --campaign --> email opens --> messages/users
+
+
+iter_api_email_clicks_df = createDynamicFrameFromS3('datalake-raw-510716259290/iterable_api/iterable_api_email_clicks/2023/03/07', glueContext,'json')
+iter_api_email_subs_df = createDynamicFrameFromS3('datalake-raw-510716259290/iterable_api/iterable_api_email_subscribes/2023/03/07', glueContext,'json')
+iter_api_email_opens_df = createDynamicFrameFromS3('datalake-raw-510716259290/iterable_api/iterable_api_email_opens/2023/03/07', glueContext,'json')
+iter_api_lists_df = createDynamicFrameFromS3('datalake-raw-510716259290/iterable_api/iterable_api_lists/2023/03/07', glueContext,'json')
+iter_api_message_types_df = createDynamicFrameFromS3('datalake-raw-510716259290/iterable_api/iterable_api_message_types/2023/03/07', glueContext,'json')
+iter_api_users_df = createDynamicFrameFromS3('datalake-raw-510716259290/iterable_api/iterable_api_users/2023/03/07', glueContext,'json')
+iter_api_campaigns_df = createDynamicFrameFromS3('datalake-raw-510716259290/iterable_api/iterable_api_campaigns/2023/03/07', glueContext,'json')
+iter_api_email_unsubs_df = createDynamicFrameFromS3('datalake-raw-510716259290/iterable_api/iterable_api_email_unsubscribes/2023/03/07', glueContext,'json')
+
+-- replace dots with underscores to remove special char logic
+iter_api_users_df = iter_api_users_df.toDF(*(c.replace('.', '_') for c in iter_api_users_df.columns))
+
+-- remove dup column from users
+cols_new = [] 
+seen = set()
+for c in iter_api_users_df.columns:
+    if c.lower() not in seen:
+        cols_new.append(c.lower())
+    else:
+        cols_new.append('{}_dup'.format(c.lower()))
+    seen.add(c.lower())
+    
+iter_api_users_df = iter_api_users_df.toDF(*cols_new).select(*[c for c in cols_new if not c.endswith('_dup')])
+
+-- explode some columns
+from pyspark.sql.functions import explode
+iter_api_email_subs_df = iter_api_email_subs_df.select(iter_api_email_subs_df['*'],explode(iter_api_email_subs_df.emailListIds).alias('list_id'))
+iter_api_email_unsubs_df = iter_api_email_unsubs_df.select(iter_api_email_unsubs_df['*'],explode(iter_api_email_unsubs_df.emailListIds).alias('list_id'))
+iter_api_campaigns_df = iter_api_campaigns_df.select(iter_api_campaigns_df['*'],explode(iter_api_campaigns_df.listIds).alias('marketing_list_id'))
+
+
+-- create views
+-- generate views
+iter_api_email_clicks_df.createOrReplaceTempView('email_clicks')
+iter_api_email_subs_df.createOrReplaceTempView('email_subs')
+iter_api_email_unsubs_df.createOrReplaceTempView('email_unsubs')
+iter_api_email_opens_df.createOrReplaceTempView('email_opens')
+iter_api_lists_df.createOrReplaceTempView('lists')
+iter_api_message_types_df.createOrReplaceTempView('message_types')
+iter_api_users_df.createOrReplaceTempView('users')
+iter_api_campaigns_df.createOrReplaceTempView('campaigns')
+
+-- clicks/open
+iterable_api_click_open_df = spark.sql('with email_click_open AS (select email, campaignId as campaign_id, "email_click" as marketing_event_type, templateId as template_id, null as proxy_source, ip as consumer_IP, url as click_url, messageId as message_id from email_clicks UNION select email, campaignId as campaign_id, "email_open" as marketing_event_type, templateId as template_id, proxySource as proxy_source, null as consumer_IP, null as click_url, messageId as message_id  from email_opens) select c.id as source_id, c.name as campaign_name, c.templateId, c.messageMedium as message_medium, c.createdByUserId as created_by_user_id, c.updatedByUserId as updatedByUserId, c.marketing_list_id, eco.email, eco.marketing_event_type, eco.template_id, eco.proxy_source, eco.consumer_IP, eco.click_url, msg.name as message_name, msg.subscriptionPolicy as subscription_policy,  u.firstname as name_first, u.lastname as name_last, u.address1 as address_1, u.address2 as address_2, u.city, u.stateRegion as state_region, u.country, u.postalCode as postal_code, u.juniorParent as parent_of_junior, u.totalTicketSpend as total_ticket_spend, u.signupDate as sign_up_at, u.signupSource as sign_up_source, null as interest_id , null as list_id, null as list_name, null as description, null as list_type from campaigns c left join email_click_open eco on c.id = eco.campaign_id left join message_types msg on eco.message_id = msg.id left join users u on eco.email=u.email')
+
+--sub/unsub
+-- our firstname, lastname are null in users api in sandbox atleast
+iterable_api_sub_unsub_df = spark.sql('with email_sub_unsub AS (select email, list_id, "email_subscribe" as marketing_event_type from email_subs union select email, list_id, "email_unsubscribe" as marketing_event_type from email_unsubs) select c.id as source_id, c.name as campaign_name, c.templateId, c.messageMedium as message_medium, c.createdByUserId as created_by_user_id, c.updatedByUserId as updatedByUserId, c.marketing_list_id, es.email, es.marketing_event_type, null as template_id, null as proxy_source, null as consumer_IP, null as click_url, null as message_name, null as subscription_policy, u.firstname as name_first, u.lastname as name_last, u.address1 as address_1, u.address2 as address_2, u.city, u.stateRegion as state_region, u.country, u.postalCode as postal_code, u.juniorParent as parent_of_junior, u.totalTicketSpend as total_ticket_spend, u.signupDate as sign_up_at, u.signupSource as sign_up_source, null as interest_id, es.list_id, li.name as list_name, li.description, li.listType as list_type from campaigns c left join lists li on c.marketing_list_id = li.id left join email_sub_unsub es on li.id=es.list_id left join users u on es.email=u.email')
+
+-- union both dataframes
+iterable_api_df = iterable_api_click_open_df.union(iterable_api_sub_unsub_df)

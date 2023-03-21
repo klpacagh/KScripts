@@ -9,248 +9,121 @@ from pyspark.sql.functions import udf, col
 from pyspark.sql.types import StringType
 import boto3
 import re
+import csv
+import json
 from datetime import date
 from pyspark.sql.types import *
+from helpers import check_inputs,RTTVerifyPhoneAndEmail,removeDuplicateColNames,FindLatestPrefix,createConfigDF,createDynamicFrameFromS3,writeDynamicFrameToS3,TrimFields
 
-todays_date = date.today()
-
-args = getResolvedOptions(sys.argv, ["JOB_NAME", "source_bucket", "quarantine_bucket", "trusted_bucket","config_file_path","source_system_name","source_system_table_name"])
+# main params
+todays_date =str(date.today()).replace("-","/")
+args = getResolvedOptions(sys.argv, ["JOB_NAME", "source_bucket", "quarantine_bucket", "trusted_bucket","source_system_name","source_system_table_name","source_database_instance_name", "cross_account_event_bus", "glue_scripts_bucket"])
 sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"] + str(todays_date))
-system_name = args["source_system_name"]
+
+# params
+system_name = args["source_system_name"].lower()
+db_instance_name = args["source_database_instance_name"].lower()
+source_system_table_name = args["source_system_table_name"].lower()
+config_bucket_name = args["glue_scripts_bucket"].lower()
+s3_config_file_name = 'sttm_config.csv'
+s3_client = boto3.client('s3')
+source_bucket = args['source_bucket'] #'datalake-raw-510716259290'
+config_file_path = "{}/{}".format(config_bucket_name,s3_config_file_name)
 
 print("SYSTEM NAME: ", system_name)
 
-def ValidatePhone(number):
-    
-    # checks for null value first
-    if number is not None:
-            
-    # remove special characters        
-        number = re.sub(r"[^0-9]", "", number)
-        
-    # check that phone is a 10 digit number without/without country code   
-        if len(number) in range(10,13):
-                return 'valid'
-            
-        else:
-            return 'invalid'
-                        
-def ValidateEmail(email):
-    top_level_domains = ["com","org","net","int","edu","gov","mil","biz"]
-    
-    # matches email string requirements based on RFC5322 standards
-    main_match = re.search(r'([A-Za-z0-9]+[.-_])*[A-Za-z0-9]+@[A-Za-z0-9-]+(\.[A-Z|a-z]{2,})+', str(email))
-
-    if main_match:
-    
-    # search for . after @ and verify top level domain 
-    
-        index_of_amperstand = email.rindex("@") + 1
-        index_of_period = email.rindex(".", index_of_amperstand) + 1
-        domain_sub = email[index_of_period:] # matches the domain
-        if domain_sub in top_level_domains:
-            return "valid"
-        
-    return "invalid"
-
-# main params
-s3_client = boto3.client('s3')
-source_bucket = args['source_bucket'] #'datalake-raw-510716259290'
-config_file_path = args['config_file_path'] #'pga-pipeline-scripts/sttm_config.csv'
-
-todays_date =str(date.today()).replace("-","/")
-
-# initialize UDFs 
-emailValidateUDF = udf(lambda x: ValidateEmail(x), StringType())
-phoneValidateUDF = udf(lambda x: ValidatePhone(x), StringType())
+# assert user inputs are valid
+check_inputs(config_bucket_name, s3_config_file_name, args["cross_account_event_bus"], args["source_system_name"],args["source_system_table_name"], args["source_database_instance_name"], args["JOB_NAME"])
 
 # setup config/lookup table
-configDF = glueContext.create_dynamic_frame.from_options(
-    connection_type="s3",
-    format="csv",
-    format_options= {'withHeader': True},
-    connection_options={"paths": ["s3://{}".format(config_file_path)], "recurse": True},
-    transformation_ctx="config_node_ctx"
-)
-
-configSparkDF = configDF.toDF()
+configSparkDF = createConfigDF(config_file_path,glueContext)
 configSparkDF.show(truncate=False)
 
-# looping through these collections
-if "salesforce" in system_name:
+# create collection - source_system_table_name is none for glue jobs
+if args["source_system_table_name"] != "none":
     distinctSystemTablesCollection = configSparkDF.select('source_system',"schema","source_table").distinct().filter((configSparkDF['source_system'] == system_name) & (configSparkDF['source_table'] == args["source_system_table_name"])).collect()
 else:
     distinctSystemTablesCollection = configSparkDF.select('source_system',"schema","source_table").distinct().filter(configSparkDF['source_system'] == system_name).collect()
-    
-    temp_bucket = s3_client.list_objects(Bucket=source_bucket, Prefix=system_name, MaxKeys=2)
-    temp_bucket_record = temp_bucket['Contents'][1]['Key'].split('/')[1]
-    parsed_db_instance_name = ""
         
-print("object name: ", distinctSystemTablesCollection)
-
-configCollection = configSparkDF.collect()
+print("Collection: ", distinctSystemTablesCollection)
 
 # data cleanup
     
 for row in distinctSystemTablesCollection:
     
-    if "salesforce" in row['source_system']:
+    if row['schema'] == 'null': # non-glue systems
         s3_table_prefix = "{}/{}/{}".format(row['source_system'], row['source_table'], todays_date)
     else:
-        if parsed_db_instance_name == "":
-            db_schema = '_' + row['schema'] + '_'
-            index_of = temp_bucket_record.index(db_schema)
-            parsed_db_instance_name = temp_bucket_record[:index_of]
-
-        concat_tab_name = "{}_{}_{}".format(parsed_db_instance_name, row['schema'], row['source_table'])
+        concat_tab_name = "{}_{}_{}".format(db_instance_name.replace("/","_"), row['schema'], row['source_table'])
         s3_table_prefix = "{}/{}/{}".format(row['source_system'], concat_tab_name, todays_date)
+
+    latest_s3_table_prefix = FindLatestPrefix(s3_client, source_bucket, s3_table_prefix)
         
-    results = s3_client.list_objects(Bucket=source_bucket, Prefix=s3_table_prefix)
-    # print("results: ", results)
+    results = s3_client.list_objects_v2(Bucket=source_bucket, Prefix=latest_s3_table_prefix)
     s3_table_prefix_exists = 'Contents' in results
     
+    # get file extension
+    file_extension=""
+    try:
+        first_key = results['Contents'][0]['Key']
+        extension_index = first_key.rindex('.') + 1
+        file_extension = first_key[extension_index:]
+    except:
+        file_extension="parquet"
+        
     if s3_table_prefix_exists:
 
         quarantine_bucket = args['quarantine_bucket'] #'non-trusted-data-quarantine'
-        trusted_bucket = args['trusted_bucket'] #'datalake-trusted-510716259290'
+        trusted_bucket = args['trusted_bucket'] #'datalake-trusted-NNNNNNNNN
 
         print("processing for: ", row['source_system'], ":", row['source_table'])
-        target_table_folder = "{}/{}".format(source_bucket, s3_table_prefix)
-        quarantine_table_folder = "{}/{}".format(quarantine_bucket, s3_table_prefix)
-        trusted_table_folder = "{}/{}".format(trusted_bucket, s3_table_prefix)
+        target_table_folder = "{}/{}".format(source_bucket, latest_s3_table_prefix)
+        quarantine_table_folder = "{}/{}".format(quarantine_bucket, latest_s3_table_prefix)
+        trusted_table_folder = "{}/{}".format(trusted_bucket, latest_s3_table_prefix)
 
         print("table bucket location: ", target_table_folder)
         print("quarantine bucket location: ", quarantine_table_folder)
         print("trusted bucket location: ", trusted_table_folder)
 
-        rawDF = glueContext.create_dynamic_frame.from_options(
-            format_options={},
-            connection_type="s3",
-            format="parquet",
-            connection_options={"paths": ["s3://{}".format(target_table_folder)], "recurse": True},
-            transformation_ctx="temp_node_ctx"
-        )
-
         # convert dynamic frame to spark dataframe and perform basic data cleaning
-        sparkDF = rawDF.toDF()
-        print("df starting row count: ", sparkDF.count())
-        # sparkDF_toLower = sparkDF.select([F.col(x).alias(x.lower()) for x in sparkDF.columns])
-        # sparkDF_toLower = sparkDF.toDF(*[c.lower() for c in sparkDF.columns])
-        no_dupes = sparkDF.dropDuplicates().dropna(how='all')
-        print("df with dups removed  count: ", no_dupes.count())
+        sparkDF = createDynamicFrameFromS3(target_table_folder,glueContext,file_extension)
+        print("DF starting row count: ", sparkDF.count())
+
+        # special case for API based ingestion source systems
+        if system_name in ['iterable_api','splash_that','golf_genius']:
+            # replace dots with underscores to remove special char logic if exists
+            sparkDF = sparkDF.toDF(*(c.replace('.', '_') for c in sparkDF.columns))
+            # remove duplicate column names that may exist (only for json file source systems)
+            sparkDF = removeDuplicateColNames(sparkDF)
+
+        # dropping duplicate and null records
+        remDupsDF = sparkDF.dropDuplicates().dropna(how='all')
+        print("DF with duplicates and null records removed count: ", remDupsDF.count())
+
 
         # get table columns
         table_cols = configSparkDF.filter((col("source_system") == row["source_system"]) & (col("source_table") == row["source_table"] )).select("source_column").rdd.map(lambda x: x.source_column).collect()
-        # print(table_cols)
 
-        # empty 
-        valid_email_df = 0
-        invalid_email_df = 0
-        valid_phone_df = 0
-        invalid_phone_df = 0
-        email_pass = False
-        phone_pass = False
-        
-        if "email" in table_cols:
-            validation_df = no_dupes.withColumn('email_validation', emailValidateUDF(col('email')))
-            valid_email_df = validation_df.filter(validation_df['email_validation'] == 'valid').drop('email_validation')
-            invalid_email_df = validation_df.filter(validation_df['email_validation'] == 'invalid').drop('email_validation')
-            email_pass = True
+        # trim all target fields
+        trimmedDF = TrimFields(remDupsDF, table_cols)
 
-        if ("phone" and "mobilephone" and "homephone") in table_cols and phone_pass == False:
-            if email_pass == True:
-                temp_valid_df = valid_email_df.withColumn( 'phone_validation', phoneValidateUDF(col("phone"))).withColumn( 'mobilephone_validation', phoneValidateUDF(col("mobilephone"))).withColumn( 'homephone_validation', phoneValidateUDF(col("homephone")))
-                temp_invalid_df = invalid_email_df.withColumn( 'phone_validation', phoneValidateUDF(col("phone"))).withColumn( 'mobilephone_validation', phoneValidateUDF(col("mobilephone"))).withColumn( 'homephone_validation', phoneValidateUDF(col("homephone")))
-                valid_phone_df = temp_valid_df.filter((temp_valid_df['phone_validation'] == 'valid') | (temp_valid_df['mobilephone_validation'] == 'valid') | (temp_valid_df['homephone_validation'] == 'valid')).drop('phone_validation','mobilephone_validation','homephone_validation')
-                invalid_phone_df = temp_invalid_df.filter((temp_invalid_df['phone_validation'] == 'invalid') & (temp_invalid_df['mobilephone_validation'] == 'invalid') & (temp_invalid_df['homephone_validation'] == 'invalid')).drop('phone_validation','mobilephone_validation','homephone_validation')
-                phone_pass = True
-            else:
-                temp_df = no_dupes.withColumn( 'phone_validation', phoneValidateUDF(col("phone"))).withColumn( 'mobilephone_validation', phoneValidateUDF(col("mobilephone"))).withColumn( 'homephone_validation', phoneValidateUDF(col("homephone")))
-                valid_phone_df = validation_df.filter((temp_df['phone_validation'] == 'valid') | (temp_df['mobilephone_validation'] == 'valid') | (temp_df['homephone_validation'] == 'valid')).drop('phone_validation','mobilephone_validation','homephone_validation')
-                invalid_phone_df = validation_df.filter((temp_df['phone_validation'] == 'invalid') & (temp_df['mobilephone_validation'] == 'invalid') & (temp_df['homephone_validation'] == 'invalid')).drop('phone_validation','mobilephone_validation','homephone_validation')
-                phone_pass = True
-
-        if ("phone" and "mobilephone") in table_cols and phone_pass == False:
-            if email_pass == True:
-                temp_valid_df = valid_email_df.withColumn( 'phone_validation', phoneValidateUDF(col("phone"))).withColumn( 'mobilephone_validation', phoneValidateUDF(col("mobilephone")))
-                temp_invalid_df = invalid_email_df.withColumn( 'phone_validation', phoneValidateUDF(col("phone"))).withColumn( 'mobilephone_validation', phoneValidateUDF(col("mobilephone")))
-                valid_phone_df = temp_valid_df.filter((temp_valid_df['phone_validation'] == 'valid') | (temp_valid_df['mobilephone_validation'] == 'valid')).drop('phone_validation','mobilephone_validation')
-                invalid_phone_df = temp_invalid_df.filter((temp_invalid_df['phone_validation'] == 'invalid') & (temp_invalid_df['mobilephone_validation'] == 'invalid')).drop('phone_validation','mobilephone_validation')
-                phone_pass = True
-            else:
-                temp_df = no_dupes.withColumn( 'phone_validation', phoneValidateUDF(col("phone"))).withColumn( 'mobilephone_validation', phoneValidateUDF(col("mobilephone")))
-                valid_phone_df = validation_df.filter((temp_df['phone_validation'] == 'valid') | (temp_df['mobilephone_validation'] == 'valid')).drop('phone_validation','mobilephone_validation')
-                invalid_phone_df = validation_df.filter((temp_df['phone_validation'] == 'invalid') & (temp_df['mobilephone_validation'] == 'invalid')).drop('phone_validation','mobilephone_validation')
-                phone_pass = True
-
-        if "phone" in table_cols and phone_pass == False:
-            if email_pass == True:
-                temp_valid_df = valid_email_df.withColumn( 'phone_validation', phoneValidateUDF(col("phone")))
-                temp_invalid_df = invalid_email_df.withColumn( 'phone_validation', phoneValidateUDF(col("phone")))
-                valid_phone_df = temp_valid_df.filter((temp_valid_df['phone_validation'] == 'valid')).drop('phone_validation')
-                invalid_phone_df = temp_invalid_df.filter((temp_invalid_df['phone_validation'] == 'invalid')).drop('phone_validation')
-                phone_pass = True
-            else:
-                temp_df = no_dupes.withColumn( 'phone_validation', phoneValidateUDF(col("phone")))
-                valid_phone_df = validation_df.filter((temp_df['phone_validation'] == 'valid')).drop('phone_validation')
-                invalid_phone_df = validation_df.filter((temp_df['phone_validation'] == 'invalid')).drop('phone_validation')
-                phone_pass = True
- 
-        # valid df
-        if valid_email_df == 0 and valid_phone_df == 0: 
-            valid_df = no_dupes # no invalid df
-        elif valid_email_df != 0 and valid_phone_df != 0: # both email and phone df's - valid_phone_df is the combination of both
-            valid_df = valid_phone_df
-        elif valid_email_df == 0 and valid_phone_df != 0:
-            valid_df = valid_phone_df
-        elif valid_email_df != 0 and valid_phone_df == 0:
-            valid_df = valid_email_df 
-
-        # invalid df
-        invalid_df = spark.range(0).drop("id") # creates empty df
-
-        if invalid_email_df != 0 and invalid_phone_df != 0:
-            invalid_df = invalid_phone_df
-        elif invalid_email_df == 0 and invalid_phone_df != 0:
-            invalid_df = invalid_phone_df
-        elif invalid_email_df != 0 and invalid_phone_df == 0:
-            invalid_df = invalid_email_df
+        # cleanup email and phone cols
+        valid_df,invalid_df = RTTVerifyPhoneAndEmail(trimmedDF, table_cols, system_name, spark)
 
         # convert back to dynamicframe
         valid_df_end = DynamicFrame.fromDF(valid_df, glueContext, 'valid_data')
         invalid_df_end = DynamicFrame.fromDF(invalid_df,glueContext, 'invalid_data')
 
-        print("valid df count: ", valid_df_end.count())
-        print("invalid df count: ", invalid_df_end.count())
+        # write invalid dataframe to Quarantine bucket
+        writeDynamicFrameToS3(quarantine_table_folder, invalid_df_end, glueContext, 'quarantine_bucket')
 
-        # repartition dynamicframes to output exactly 20 files to s3
-        valid_df_end = valid_df_end.repartition(20)
-        invalid_df_end = invalid_df_end.repartition(20)
-
-        
-        # write to targets
-        quarantine_bucket = glueContext.write_dynamic_frame.from_options(
-            frame=invalid_df_end,
-            connection_type='s3',
-            format='glueparquet',
-            connection_options={
-                'path': 's3://{}'.format(quarantine_table_folder)
-            },
-            transformation_ctx ='quarantine_bucket'
-        )
-
-        trusted_bucket = glueContext.write_dynamic_frame.from_options(
-            frame=valid_df_end,
-            connection_type='s3',
-            format='glueparquet',
-            connection_options={
-                'path': 's3://{}'.format(trusted_table_folder)
-            },
-        )
+        # write valid dataframe to Trusted bucket
+        writeDynamicFrameToS3(trusted_table_folder, valid_df_end, glueContext, 'trusted_bucket')
+        print('{}:RTT Successful for System: {}:{}'.format(todays_date,system_name,source_system_table_name))
         
     else:
         print(s3_table_prefix, "does not exists")

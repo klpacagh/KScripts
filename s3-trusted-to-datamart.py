@@ -13,6 +13,7 @@ from pyspark.sql.types import StringType,IntegerType
 from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql.functions import col, split, lit, regexp_replace, current_timestamp, expr, udf
 from pyspark.sql.types import StringType, BooleanType, DoubleType, LongType, DateType, IntegerType
+from helpers import get_db_instances, create_table_dict, dropNullTableRecords, addCreatedAndUpdatedAt
 
 args = getResolvedOptions(sys.argv, ['JOB_NAME', 'trusted_bucket', 'refined_bucket', 'config_file_path', 'connection_name', 'redshift_role_arn', 'db_name', 'schema_name'])
 
@@ -22,108 +23,23 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 job.commit()
-
-# drop records where every column, except for id columns, is null
-def dropNullTableRecords(df_dict):
-    subs = []
-    return_df_dict = {}
-    
-    for k,df in df_dict.items():
-        
-        subs = [c for c in df.columns if "id" not in c.lower()]
-        return_df_dict[k] = df.dropna(subset=subs, how='all') 
-    return return_df_dict
-
-# append created_at and updated_at timestamps to dataframes
-def addCreatedAndUpdatedAt(df_dict):
-    return_df_dict = {}
-    
-    for k,df in df_dict.items():
-        return_df_dict[k] = df.withColumn('created_at',lit(current_timestamp())).withColumn('updated_at',lit(current_timestamp()))
-    return return_df_dict
     
 todays_date =str(date.today()).replace("-","/")
 
-glue_client = boto3.client('glue')
-glue_job_response_temp = glue_client.get_job_runs(JobName='rtt-glue-job', MaxResults=100)
-glue_run_list =  glue_job_response_temp['JobRuns']
-# print(glue_run_list)
+system_to_db_map = get_db_instances('rtt-glue-job', 200)
 
-system_to_db_map = {}
-            
-for item in glue_run_list:
-    if 'Arguments' in item:
-        if '--source_database_instance_name' in item['Arguments']:
-            if item['Arguments']['--source_system_name'] not in system_to_db_map:
-                system_to_db_map[item['Arguments']['--source_system_name']] = item['Arguments']['--source_database_instance_name']
-
-print("system to db map: ", system_to_db_map)
-
-s3_client = boto3.client('s3')
-trusted_bucket = args['trusted_bucket']
-refined_bucket = args['refined_bucket']
-config_file_path = args['config_file_path']
-
-configDF = glueContext.create_dynamic_frame.from_options(
-    connection_type="s3",
-    format="csv",
-    format_options= {'withHeader': True},
-    connection_options={"paths": ["s3://{}".format(config_file_path)], "recurse": True},
-    transformation_ctx="config_node_ctx"
-)
-
-
-configDF = glueContext.create_dynamic_frame.from_options(
-    connection_type="s3",
-    format="csv",
-    format_options= {'withHeader': True},
-    connection_options={"paths": ["s3://{}".format(config_file_path)], "recurse": True},
-    transformation_ctx="config_node_ctx"
-)
-
-configCollection = configDF.toDF().select('source_system','schema','source_table').distinct().collect()
-
-data_dict = {}
-
-for row in configCollection:
-    
-    if "salesforce" in row['source_system']:
-        s3_table_prefix = "{}/{}/{}".format(row['source_system'], row['source_table'], todays_date)
-        
-    else:
-        concat_tab_name = "{}_{}_{}".format(system_to_db_map[row['source_system']], row['schema'], row['source_table'])
-
-        s3_table_prefix = "{}/{}/{}".format(row['source_system'], concat_tab_name, todays_date)
-        
-    results = s3_client.list_objects(Bucket=trusted_bucket, Prefix=s3_table_prefix)
-
-    s3_table_prefix_exists = 'Contents' in results
-    
-    
-    if s3_table_prefix_exists:
-
-        print("processing for: ", row['source_system'], ":", row['source_table'])
-        trusted_table_folder = "{}/{}".format(trusted_bucket, s3_table_prefix)
-
-        trustedDF = glueContext.create_dynamic_frame.from_options(
-            format_options={},
-            connection_type="s3",
-            format="parquet",
-            connection_options={"paths": ["s3://{}".format(trusted_table_folder)], "recurse": True},
-            transformation_ctx="temp_node_ctx"
-        )
-        
-        data_dict['{}_{}'.format(row['source_system'], row['source_table'])] = trustedDF.toDF()
+data_dict = create_table_dict(glueContext, args["config_file_path"], args["trusted_bucket"], system_to_db_map, todays_date)
         
 data_dict['salesforce-career-services_salesforce-career-services-contact'].createOrReplaceTempView('salesforce_contact')
 
 # select columns from salesforce
-salesforce = spark.sql("select Email, Phone, HomePhone, MobilePhone, FirstName, LastName, Birthdate, MailingStreet, MailingCity, MailingState, MailingCountry, MailingPostalCode, Gender__c as Gender from salesforce_contact")
+salesforce = spark.sql("select trim(BOTH ' \t' FROM Email) as Email, Phone, HomePhone, MobilePhone, FirstName, LastName, Birthdate, MailingStreet, MailingCity, MailingState, MailingCountry, MailingPostalCode, Gender__c as Gender from salesforce_contact")
 
 # manipulate dataframe columns to match target schema
 salesforce = salesforce.withColumn("Address1", split(col("MailingStreet"), ",").getItem(0)).withColumn("Address2", split(col("MailingStreet"), ",").getItem(1)).drop("MailingStreet")
-salesforce = salesforce.withColumn("relationship_type", lit(None)).withColumn("home_course", lit(None)).withColumn("Handicap", lit(None))
-salesforce = salesforce.dropDuplicates(['Email']).dropna(subset=['Email'])
+salesforce = salesforce.withColumn("juniorParent", lit(None)).withColumn("home_course", lit(None)).withColumn("Handicap", lit(None))
+salesforce = salesforce.dropDuplicates(['Email','FirstName','LastName']).dropna(subset=['Email'])
+print("Salesforce dataframe created")
 
 data_dict['coach_tools_payment_accounts'].createOrReplaceTempView('payment_accounts')
 data_dict['coach_tools_contacts'].createOrReplaceTempView('contacts')
@@ -135,11 +51,19 @@ data_dict['coach_tools_representatives'].createOrReplaceTempView('representative
 data_dict['coach_tools_students'].createOrReplaceTempView('students')
 
 # join coach_tools tables
-coach = spark.sql("select a.email, a.phone_number, a.address1, a.address2, a.city, a.state, a.zip, b.first_name, b.last_name, d.gender, e.relationship_type from contacts a left join students b on a.email = b.email left join connections c on b.id = c.student_id left join profiles d on c.student_id = d.student_id left join representatives e on a.id = e.contact_id")
+data_dict['coach_tools_contacts'].createOrReplaceTempView('contacts')
+data_dict['coach_tools_coach_connections'].createOrReplaceTempView('connections')
+data_dict['coach_tools_demographic_profiles'].createOrReplaceTempView('profiles')
+data_dict['coach_tools_representatives'].createOrReplaceTempView('representatives')
+data_dict['coach_tools_students'].createOrReplaceTempView('students')
 
+# join coach_tools tables
+print("joining coach tables")
+coach = spark.sql("select trim(BOTH ' \t' FROM a.email) as email, a.phone_number, a.address1, a.address2, a.city, a.state, a.zip, b.first_name, b.last_name, d.gender, case when e.relationship_type = 'PARENT' then TRUE else FALSE end juniorParent from contacts a left join students b on trim(BOTH ' \t' FROM a.email) = trim(BOTH ' \t' FROM b.email) left join connections c on b.id = c.student_id left join profiles d on c.student_id = d.student_id left join representatives e on a.id = e.contact_id")
 # append null columns to match target schema
 coach = coach.withColumn('country', lit(None)).withColumn("home_course", lit(None)).withColumn("handicap", lit(None))
-coach = coach.dropDuplicates(['email']).dropna(subset=['email'])
+coach = coach.dropDuplicates(['email','first_name','last_name']).dropna(subset=['email'])
+print("Coach dataframe created")
 
 data_dict['ccms_evt_reg_tourn_info'].createOrReplaceTempView('tournaments')
 data_dict['ccms_cen_cust_phone'].createOrReplaceTempView('phone')
@@ -149,23 +73,21 @@ data_dict['ccms_cen_cust_mast'].createOrReplaceTempView('master')
 data_dict['ccms_evt_reg_hdr'].createOrReplaceTempView('hdr')
 
 # join CCMS tables
-ccms = spark.sql("select a.cust_id, a.first_nm, a.last_nm, a.birth_dt,a.sex, b.street1, b.street2, b.city_nm, b.state_cd, b.country_nm, b.postal_cd,  c.cyber_txt, d.phone_num, f.home_course, f.HANDICAP from master a left join address b on a.cust_id = b.cust_id left join cyber c on b.cust_id = c.cust_id left join phone d on c.cust_id = d.cust_id left join hdr e on d.cust_id = e.cust_id left join tournaments f on e.REGI_SERNO = f.REGI_SERNO")
-
-ccms = ccms.withColumn("home_course", lit(None)).withColumn("handicap", lit(None))
+print("joining CCMS tables")
+ccms = spark.sql("select a.cust_id, a.first_nm, a.last_nm, a.birth_dt,a.sex, b.street1, b.city_nm, b.state_cd, b.country_nm, b.postal_cd,  trim(BOTH ' \t' FROM c.cyber_txt) as cyber_txt, d.phone_num, f.home_course, f.HANDICAP from master a left join address b on a.cust_id = b.cust_id left join cyber c on b.cust_id = c.cust_id left join phone d on c.cust_id = d.cust_id left join hdr e on d.cust_id = e.cust_id left join tournaments f on e.REGI_SERNO = f.REGI_SERNO")
+# append null columns to match target schema
+ccms = ccms.withColumn("street2", lit(None)).withColumn("juniorParent", lit(None)).withColumn("home_course", lit(None)).withColumn("handicap", lit(None))
 ccms = ccms.dropDuplicates(['cyber_txt','first_nm','last_nm']).dropna(subset=['cyber_txt'])
+print("CCMS dataframe created")
 
-# cast all system columns as strings before union
-systems = [salesforce, coach, ccms]
-for system in systems:
-    system = system.select([col('{}'.format(c)).cast(StringType()).alias(c) for c in system.columns])
-    
+# union source system tables 
 salesforce.createOrReplaceTempView('salesforce')
 coach.createOrReplaceTempView('coach')
 ccms.createOrReplaceTempView('ccms')
 
 # union source system tables 
 print('joining source sytem tables')
-joined = spark.sql("(select Email as email, Phone as phoneNumber, FirstName as firstName, LastName as lastName, Gender as gender, Address1 as address1, Address2 as address2, MailingCity as city, MailingState as state, MailingCountry as country, MailingPostalCode as postalCode, home_course as homeCourse, Handicap as handicap from Salesforce) UNION (select email, phone_number, first_name, last_name, gender, address1, address2, city, state, country, zip, home_course, handicap from coach) UNION (select cyber_txt, phone_num, first_nm, last_nm, sex, street1, street2, city_nm, state_cd, country_nm, postal_cd, home_course, HANDICAP from ccms)")
+joined = spark.sql("(select trim(BOTH '\t' FROM Email) as email, Phone as phoneNumber, FirstName as firstName, LastName as lastName, juniorParent, Gender as genderEst, Address1 as address1, Address2 as address2, MailingCity as city, MailingState as stateRegion, MailingCountry as country, MailingPostalCode as postalCode, home_course as homeCourse, Handicap as handicap from Salesforce) UNION (select trim(BOTH '\t' FROM email), phone_number, first_name, last_name, juniorParent, gender, address1, address2, city, state, country, zip, home_course, handicap from coach) UNION (select trim(BOTH '\t' FROM cyber_txt) as email, phone_num, first_nm, last_nm, juniorParent, sex, street1, street2, city_nm, state_cd, country_nm, postal_cd, home_course, HANDICAP from ccms)")
 
 table_dict = {}
 
@@ -173,7 +95,8 @@ table_dict = {}
 joined = joined.withColumn("phoneNumber", regexp_replace("phoneNumber", "[^0-9a-zA-Z$]+", "")).withColumn("id", expr("uuid()")).withColumn("profile_id", expr("uuid()")).withColumn("email_id", expr("uuid()"))
 
 joined = joined.cache()
-joined.count()
+print("joined count: ", joined.count())
+
 
 # Id needs to be consumers.profile_id
 table_dict['emails'] = joined.select(col('email_id').alias('id'),
@@ -183,13 +106,13 @@ table_dict['emails'] = joined.select(col('email_id').alias('id'),
 table_dict['profiles'] = joined.select(col('profile_id').alias('id'),
                          col('firstName').alias('name_first'),
                          col('lastName').alias('name_last'), 
-                         col('gender'),
+                         col('genderEst').alias('gender'),
                          lit(None).cast(StringType()).alias('league'),
                          lit(None).cast(StringType()).alias('team')) 
 
 ## add email_id and phone_id
 
-## id is primary key, foreign key to consumer_interests, coansumer_address, orders, sources
+## id is primary key, foreign key to consumer_interests, consumer_address, orders, sources
 
 table_dict['consumers'] = joined.select(
             col('id'),
@@ -235,7 +158,7 @@ table_dict['addresses'] = joined.select(lit(None).cast(IntegerType()).alias('id'
                         lit(None).cast(StringType()).alias('address_3'),
                         lit(None).cast(StringType()).alias('address_4'),
                         'city',
-                        col('state').alias('state_region'),
+                        col('stateRegion').alias('state_region'),
                         lit(None).cast(StringType()).alias('int_region'),
                         'country',
                         col('postalCode').alias('postal_code')).withColumn('id',expr("uuid()"))
@@ -293,7 +216,7 @@ for k,v in table_dict.items():
 
     # make sure target folder is empty as dynamicframes will not overwrite
     try:
-        glueContext.purge_s3_path('s3://{}/{}/{}/{}'.format(refined_bucket,'datamart', k, todays_date), {"retentionPeriod": 0})
+        glueContext.purge_s3_path('s3://{}/{}/{}/{}'.format(args['refined_bucket'],'datamart', k, todays_date), {"retentionPeriod": 0})
     except:
         print("Exception occured in clearing target folder location")
         
@@ -304,7 +227,7 @@ for k,v in table_dict.items():
             connection_type='s3',
             format='json',
             connection_options={
-                'path': 's3://{}/{}/{}/{}'.format(refined_bucket,'datamart', k, todays_date)
+                'path': 's3://{}/{}/{}/{}'.format(args['refined_bucket'],'datamart', k, todays_date)
             },
         )
     
