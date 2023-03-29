@@ -78,7 +78,6 @@ golf_genius,null,golf_genius_master_roster,custom_fields.gender
 golf_genius,null,golf_genius_master_roster,custom_fields.address_1
 golf_genius,null,golf_genius_master_roster,custom_fields.address_2
 golf_genius,null,golf_genius_master_roster,custom_fields.city
-golf_genius,null,golf_genius_master_roster,custom_fields.pga_member_id
 golf_genius,null,golf_genius_master_roster,team_name
 axs,ticketing,customers,first_name
 axs,ticketing,customers,last_name
@@ -127,7 +126,6 @@ iterable_api,null,iterable_api_users,city
 iterable_api,null,iterable_api_users,stateRegion
 iterable_api,null,iterable_api_users,country
 iterable_api,null,iterable_api_users,postalCode
-iterable_api,null,iterable_api_users,juniorParent
 iterable_api,null,iterable_api_users,totalTicketSpend
 iterable_api,null,iterable_api_users,signupDate
 iterable_api,null,iterable_api_campaigns,id
@@ -204,3 +202,7 @@ salesforce-championships,null,salesforce-championships-opportunity,id
 salesforce-championships,null,salesforce-championships-opportunity,amount
 salesforce-championships,null,salesforce-championships-opportunity,closedate
 salesforce-championships,null,salesforce-championships-opportunity,contactid
+salesforce-championships,null,salesforce-championships-opportunitylineitem,name
+salesforce-championships,null,salesforce-championships-opportunitylineitem,listPrice
+salesforce-championships,null,salesforce-championships-opportunitylineitem,pricebookentryid
+salesforce-championships,null,salesforce-championships-opportunitylineitem,quantity

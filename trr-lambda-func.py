@@ -3,7 +3,8 @@ import logging
 import csv
 import boto3
 import json
-from datetime import date
+from datetime import date,datetime
+from botocore.exceptions import ClientError
 
 # Set up logging
 
@@ -11,6 +12,34 @@ log = logging.getLogger(__name__)
 log_level = os.environ.get('LOG_LEVEL')
 if log_level:
     log.setLevel(log_level)
+
+def paginate_through_jobruns(job_name,max_items=None,page_size=None, starting_token=None):
+    glue_client = boto3.client('glue')
+    try:
+        paginator = glue_client.get_paginator('get_job_runs')
+        response = paginator.paginate(JobName=job_name, PaginationConfig={
+             'MaxItems':max_items,
+             'PageSize':page_size,
+             'StartingToken':starting_token}
+        )
+        return response
+    except ClientError as e:
+        raise Exception("boto3 client error in paginate_through_jobruns: " + e.__str__())
+    except Exception as e:
+        raise Exception("Unexpected error in paginate_through_jobruns: " + e.__str__())
+
+def get_failed_jobs(job_run_history):
+    failed_jobs = []
+    for jobs in job_run_history: # one layer
+        # iterate through the jobs
+        for job in jobs['JobRuns']:
+            if job['StartedOn'].date() == datetime.today().date():
+                if job['JobRunState'] not in [ 'SUCCEEDED', 'RUNNING']:
+                    if '--source_system_table_name' in job['Arguments'].keys():
+                        failed_jobs.append([job['Arguments']['--source_system_name'],job['Arguments']['--source_system_table_name']])
+                    else:
+                        failed_jobs.append([job['Arguments']['--source_system_name'],'None'])
+    return failed_jobs
 
 def lambda_handler(event, context):
     rtt_glue_job_name = os.environ['RTT_JOB_NAME']
@@ -63,7 +92,7 @@ def ttr_main(rtt, ttr):
     s3_object = s3_resource.Object(config_bucket_name, s3_file_name)
 
     system_to_db_map = {}
-    cross_account_event_bus=os.environ['CROSSACCOUNT_EVENT_BUS']
+    cross_account_event_bus=os.environ['CROSSACCOUNT_EVENT_BUS_NAME']
     rules = events.list_rules(EventBusName= cross_account_event_bus)
 
     for rule in rules['Rules']:
@@ -145,6 +174,25 @@ def ttr_main(rtt, ttr):
         else:
             log.warn("RECENT RTT GLUE JOBS IN INVALID STATE - PLEASE FIX THEN INVOKE TRR JOB DIRECTLY")
     else:
-        # set pause and retry ?
+
         log.warn("MISSING FOLDERS FOR THE FOLLOWING - CHECK FOR RTT GLUE JOB FAILURES")
         log.warn(f'{missing_folders}')
+
+        # in UTC - checks between 8 and 9 am EST
+        if 12 <=datetime.now().hour <= 13:
+
+            # get job history
+            job_hist = paginate_through_jobruns(rtt_glue_job_name,400,200)
+
+            failed_jobs = get_failed_jobs(job_hist)
+
+            # check missing systems for failures
+            for fj in missing_folders:
+                if fj in failed_jobs:
+                    log.info(f'## RTT GLUE JOB HAD FAILURE: {fj}')
+                else:
+                    log.info(f'## Creating Dummy File - No Changed Data for : {fj}')
+                    arguments= {'--source_system_name': fj[0],'--source_system_table_name': fj[1]}
+                    response = glue_client.start_job_run(JobName = 'generate-dummy-file-glue-job',
+                                                          Arguments=arguments)
+                    log.info('## GLUE JOB RUN ID: ' + response['JobRunId'])
