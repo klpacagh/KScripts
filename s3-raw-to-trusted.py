@@ -13,7 +13,7 @@ import csv
 import json
 from datetime import date
 from pyspark.sql.types import *
-from helpers import check_inputs,RTTVerifyPhoneAndEmail,removeDuplicateColNames,FindLatestPrefix,createConfigDF,createDynamicFrameFromS3,writeDynamicFrameToS3,TrimFields
+from helpers import check_inputs,RTTVerifyPhoneAndEmail,removeDuplicateColNames,FindLatestPrefix,createConfigDF,createDynamicFrameFromS3,writeDynamicFrameToS3,TrimFields,CheckColumnsExist
 
 # main params
 todays_date =str(date.today()).replace("-","/")
@@ -69,9 +69,9 @@ for row in distinctSystemTablesCollection:
     # get file extension
     file_extension=""
     try:
-        first_key = results['Contents'][0]['Key']
-        extension_index = first_key.rindex('.') + 1
-        file_extension = first_key[extension_index:]
+        prefix_key = results['Contents'][-1]['Key']
+        extension_index = prefix_key.rindex('.') + 1
+        file_extension = prefix_key[extension_index:]
     except:
         file_extension="parquet"
         
@@ -108,8 +108,11 @@ for row in distinctSystemTablesCollection:
         # get table columns
         table_cols = configSparkDF.filter((col("source_system") == row["source_system"]) & (col("source_table") == row["source_table"] )).select("source_column").rdd.map(lambda x: x.source_column).collect()
 
+        # cross check columns 
+        checkColDF = CheckColumnsExist(remDupsDF,table_cols)
+
         # trim all target fields
-        trimmedDF = TrimFields(remDupsDF, table_cols)
+        trimmedDF = TrimFields(checkColDF, table_cols)
 
         # cleanup email and phone cols
         valid_df,invalid_df = RTTVerifyPhoneAndEmail(trimmedDF, table_cols, system_name, spark)

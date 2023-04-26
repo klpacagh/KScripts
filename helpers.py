@@ -4,7 +4,8 @@ import io
 import csv
 import re
 from pyspark.sql.functions import lit, current_timestamp, udf, col, trim, upper
-from pyspark.sql.types import StringType
+from pyspark.sql.types import StringType,StructType, ArrayType
+
 
 def createConfigDF(config_file_path,glueContext):
     # setup config/lookup datafarme
@@ -26,7 +27,11 @@ def createDynamicFrameFromS3(target_folder,glueContext,file_extension='parquet')
         format_options={},
         connection_type="s3",
         format=file_extension,
-        connection_options={"paths": ["s3://{}".format(target_folder)], "recurse": True},
+        connection_options={
+            "paths": ["s3://{}".format(target_folder)],
+            "groupSize": "134217728",
+            "recurse": True
+            },
         transformation_ctx="temp_node_ctx"
     ) 
 
@@ -46,10 +51,53 @@ def writeDynamicFrameToS3(target_folder, output_frame, glueContext, transf_ctx='
         connection_type='s3',
         format='glueparquet',
         connection_options={
-            'path': 's3://{}'.format(target_folder)
+            'path': 's3://{}'.format(target_folder),
         },
         transformation_ctx =transf_ctx
     )
+
+def write_df_to_redshift(input_df, endpoint, database, schema, dbtable, username, password, iam_role_arn, tempdir):
+    
+    print(f"writing to Redshift table {dbtable}")
+    
+    try:
+
+        input_df.write.format("com.databricks.spark.redshift").option("url", f"jdbc:redshift://{endpoint}:5439/{database}?user={username}&password={password}").option("dbtable",f"{schema}.{dbtable}").option("aws_iam_role", iam_role_arn).option("tempdir",tempdir).option("preactions","truncate table %s").option("extracopyoptions","EMPTYASNULL").mode("append").saveAsTable(dbtable)
+
+        print(f"Done writing {dbtable} to Redshift")
+    
+    except Exception as e:
+        print(f"failed to write with exception {e}")
+
+def write_df_to_s3(input_df, table, s3_target, glueContext):
+        
+    try:
+        glueContext.purge_s3_path(s3_target, {"retentionPeriod": 0})
+    except:
+        print("Exception occured in clearing target folder location")
+        
+    print('writing {} to s3'.format(table))
+    
+    try:
+        input_df.write.format("org.apache.spark.sql.json").mode("overwrite").save(s3_target)
+    except Exception as e:
+        print(f"Failed to write to S3 with exception {e}")
+
+def write_to_ttdm_targets(glueContext, table_dict, refined_bucket, endpoint, database, schema, username, password, iam_role_arn, tempdir, date, redshift=True,s3=True):
+    
+    for k in table_dict.keys():
+    
+        if s3:
+            if table_dict[k].rdd.isEmpty():
+                print('No data for {}'.format(k))
+                continue
+            
+            refined_table_folder = "s3://{}/{}/{}/{}".format(refined_bucket, "datamart", k, date)
+    
+            write_df_to_s3(table_dict[k], k, refined_table_folder, glueContext)
+        
+        if redshift:
+            write_df_to_redshift(table_dict[k], endpoint, database, schema, k, username, password, iam_role_arn, tempdir)
 
 def get_db_instances(event_bus='crossaccount-rtt-bus'):
 
@@ -303,7 +351,7 @@ def ApplyRemExtraSpacesBetween(df, col_target, cols_are_upper):
 
     # split if using dot notation
     try:
-        temp_col = col_target.split('.')[1]
+        temp_col = col_target.split('.')[-1]
     except:
         temp_col = col_target
 
@@ -338,6 +386,31 @@ def TrimFields(input_df, table_cols):
     # remove struct cols if exist
     input_df = input_df.drop(*list(struct_col_to_rem))
 
+    return input_df
+
+
+def flatten(schema, prefix=None):
+    fields = []
+    for field in schema.fields:
+        name = prefix + '.' + field.name if prefix else field.name
+        dtype = field.dataType
+        if isinstance(dtype, ArrayType):
+            dtype = dtype.elementType
+
+        if isinstance(dtype, StructType):
+            fields += flatten(dtype, prefix=name)
+        else:
+            fields.append(name.lower())
+
+    return fields
+
+def CheckColumnsExist(input_df, table_cols):
+    df_cols_flatten = flatten(input_df.schema)
+    for tc in table_cols:
+        if tc.lower() not in df_cols_flatten:
+            print("Column: ", tc, " does not exist - Adding - Verify if Schema Change Occured in Source")
+            input_df = input_df.withColumn(tc, lit(None).cast(StringType()))
+            
     return input_df
 
 def removeDuplicateColNames(input_df):
